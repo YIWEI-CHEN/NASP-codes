@@ -16,7 +16,7 @@ import torch.backends.cudnn as cudnn
 from torch.autograd import Variable
 from model_search import Network
 from architect import Architect
-from tensorboard_logger import configure, log_value
+# from tensorboard_logger import configure, log_value
 import pdb
 
 
@@ -59,7 +59,7 @@ logging.basicConfig(stream=sys.stdout, level=logging.INFO,
 fh = logging.FileHandler(os.path.join(args.save, 'log.txt'))
 fh.setFormatter(logging.Formatter(log_format))
 logging.getLogger().addHandler(fh)
-configure(args.save + "/%s"%(args.name))
+# configure(args.save + "/%s"%(args.name))
 
 
 CIFAR_CLASSES = 10
@@ -116,7 +116,7 @@ def main():
   for epoch in range(args.epochs):
     scheduler.step()
     lr = scheduler.get_lr()[0]
-    log_value("lr", lr, epoch)
+    #log_value("lr", lr, epoch)
     logging.info('epoch %d lr %e', epoch, lr)
 
     genotype = model.genotype()
@@ -130,7 +130,7 @@ def main():
     logging.info("alphas_time %f ", alphas_time)
     logging.info("forward_time %f", forward_time)
     logging.info("backward_time %f", backward_time)
-    log_value('train_acc', train_acc, epoch)
+    #log_value('train_acc', train_acc, epoch)
     logging.info('train_acc %f', train_acc)
 
     # validation
@@ -138,7 +138,7 @@ def main():
     valid_acc, valid_obj = infer(valid_queue, model, criterion)
     end_time2 = time.time()
     logging.info("inference time %f", end_time2 - start_time2)
-    log_value('valid_acc', valid_acc, epoch)
+    #log_value('valid_acc', valid_acc, epoch)
     logging.info('valid_acc %f', valid_acc)
     logging.info('alphas_normal = %s', model.alphas_normal)
     logging.info('alphas_reduce = %s', model.alphas_reduce)
