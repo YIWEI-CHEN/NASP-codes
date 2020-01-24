@@ -25,7 +25,7 @@ class MixedOp(nn.Module):
 
   def forward(self, x, weights, updateType):
     if updateType == "weights":
-      result = [w * op(x) if w.data.cpu().numpy()[0] else w for w, op in zip(weights, self._ops)]
+      result = [w * op(x) if w.data.cpu().numpy() else w for w, op in zip(weights, self._ops)]
     else:
       result = [w * op(x) for w, op in zip(weights, self._ops)]
     return sum(result)
