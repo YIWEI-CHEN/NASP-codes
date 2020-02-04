@@ -6,7 +6,9 @@ from operations import *
 from torch.autograd import Variable
 from genotypes import PRIMITIVES_NORMAL, PRIMITIVES_REDUCE, PARAMS
 from genotypes import Genotype
+import logging
 import pdb
+root = logging.getLogger()
 
 class MixedOp(nn.Module):
 
@@ -25,7 +27,7 @@ class MixedOp(nn.Module):
 
   def forward(self, x, weights, updateType):
     if updateType == "weights":
-      result = [w * op(x) if w.data.cpu().numpy()[0] else w for w, op in zip(weights, self._ops)]
+      result = [w * op(x) if w.data.cpu().numpy() else w for w, op in zip(weights, self._ops)]
     else:
       result = [w * op(x) for w, op in zip(weights, self._ops)]
     return sum(result)
@@ -68,7 +70,7 @@ class Cell(nn.Module):
 
 class Network(nn.Module):
 
-  def __init__(self, C, num_classes, layers, criterion, greedy=0, l2=0, steps=4, multiplier=4, stem_multiplier=3):
+  def __init__(self, C, num_classes, layers, criterion, greedy=0, l2=0, steps=4, multiplier=4, stem_multiplier=3, gpu=None):
     super(Network, self).__init__()
     self._C = C
     self._num_classes = num_classes
@@ -78,6 +80,7 @@ class Network(nn.Module):
     self._l2 = l2
     self._steps = steps
     self._multiplier = multiplier
+    self.gpu = None if gpu is None else gpu
 
     C_curr = stem_multiplier*C
     self.stem = nn.Sequential(
@@ -103,13 +106,14 @@ class Network(nn.Module):
     self.classifier = nn.Linear(C_prev, num_classes)
 
     self._initialize_alphas()
-    self.saved_params = []
+    self.saved_params_for_binary = []
+    self.saved_params_for_svrg = []
     for w in self._arch_parameters:
-      temp = w.data.clone()
-      self.saved_params.append(temp)
+      self.saved_params_for_binary.append(w.data.clone())
+      self.saved_params_for_svrg.append(w.data.clone())
 
   def new(self):
-    model_new = Network(self._C, self._num_classes, self._layers, self._criterion).cuda()
+    model_new = Network(self._C, self._num_classes, self._layers, self._criterion).cuda(self.gpu)
     for x, y in zip(model_new.arch_parameters(), self.arch_parameters()):
         x.data.copy_(y.data)
     return model_new
@@ -137,23 +141,27 @@ class Network(nn.Module):
       params += PARAMS[key]
     for key in PRIMITIVES_NORMAL:
       normal_burden.append(PARAMS[key]/params)
-    normal_burden = torch.autograd.Variable(torch.Tensor(normal_burden).cuda(), requires_grad=False)
+    normal_burden = torch.autograd.Variable(torch.Tensor(normal_burden).cuda(self.gpu), requires_grad=False)
     return (self.alphas_normal*self.alphas_normal*normal_burden).sum()*self._l2
 
   def _initialize_alphas(self):
     k = sum(1 for i in range(self._steps) for n in range(2+i))
     num_ops_normal = len(PRIMITIVES_NORMAL)
     num_ops_reduce = len(PRIMITIVES_REDUCE)
-    self.alphas_normal = Variable(torch.ones(k, num_ops_normal).cuda()/2, requires_grad=True)
-    self.alphas_reduce = Variable(torch.ones(k, num_ops_reduce).cuda()/2, requires_grad=True)
+    self.alphas_normal = Variable(torch.ones(k, num_ops_normal).cuda(self.gpu)/2, requires_grad=True)
+    self.alphas_reduce = Variable(torch.ones(k, num_ops_reduce).cuda(self.gpu)/2, requires_grad=True)
     self._arch_parameters = [
       self.alphas_normal,
       self.alphas_reduce,
     ]
 
-  def save_params(self):
-    for index,value in enumerate(self._arch_parameters):
-      self.saved_params[index].copy_(value.data)
+  def save_params(self, usage='binary'):
+    if usage == 'binary':
+      dst = self.saved_params_for_binary
+    else:
+      dst = self.saved_params_for_svrg
+    for index, value in enumerate(self._arch_parameters):
+      dst[index].copy_(value.data)
 
   def clip(self):
     clip_scale = []
@@ -162,6 +170,21 @@ class Network(nn.Module):
       clip_scale.append(m(Variable(self._arch_parameters[index].data)))
     for index in range(len(self._arch_parameters)):
       self._arch_parameters[index].data = clip_scale[index].data
+
+  def update_arch(self, arch_parameters, replace=False):
+    if not replace:
+      self.save_params(usage='svrg')
+    arch_numels = [a.numel() for a in self._arch_parameters]
+    arch_params_split = torch.split(arch_parameters, arch_numels)
+    for i, arch_param in enumerate(self._arch_parameters):
+      self._arch_parameters[i].data = arch_params_split[i].reshape(arch_param.shape)
+
+  def update_weight_grad(self, weight_grad):
+    weights_numels = [w.numel() for w in self.parameters()]
+    weight_params_split = torch.split(weight_grad, weights_numels)
+    for i, weight in enumerate(self.parameters()):
+      if weight.grad is not None:
+        weight.grad.data = weight_params_split[i].reshape(weight.shape)
 
   def binarization(self, e_greedy=0):
     self.save_params()
@@ -173,9 +196,13 @@ class Network(nn.Module):
         maxIndexs = self._arch_parameters[index].data.cpu().numpy().argmax(axis=1)
       self._arch_parameters[index].data = self.proximal_step(self._arch_parameters[index], maxIndexs)
 
-  def restore(self):
+  def restore(self, usage='binary'):
+    if usage == 'binary':
+      dst = self.saved_params_for_binary
+    else:
+      dst = self.saved_params_for_svrg
     for index in range(len(self._arch_parameters)):
-      self._arch_parameters[index].data = self.saved_params[index]
+      self._arch_parameters[index].data = dst[index]
 
   def proximal(self):
     for index in range(len(self._arch_parameters)):
@@ -205,7 +232,7 @@ class Network(nn.Module):
           values[index] = np.zeros(n)
       cur = cur + step
       step += 1
-    return torch.Tensor(values).cuda()
+    return torch.Tensor(values).cuda(self.gpu)
 
   def arch_parameters(self):
     return self._arch_parameters

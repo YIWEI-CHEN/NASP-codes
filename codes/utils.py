@@ -1,9 +1,17 @@
+import logging
+import multiprocessing
+import sys
+import threading
+
+import random
+
 import os
 import numpy as np
 import torch
 import shutil
 import torchvision.transforms as transforms
 from torch.autograd import Variable
+from torch.backends import cudnn
 
 
 class AvgrageMeter(object):
@@ -108,7 +116,7 @@ def drop_path(x, drop_prob):
   return x
 
 
-def create_exp_dir(path, scripts_to_save=None):
+def create_exp_dir(path, scripts_to_save=None, exec_script='scripts/exec.sh'):
   if not os.path.exists(path):
     os.mkdir(path)
   print('Experiment dir : {}'.format(path))
@@ -118,4 +126,43 @@ def create_exp_dir(path, scripts_to_save=None):
     for script in scripts_to_save:
       dst_file = os.path.join(path, 'scripts', os.path.basename(script))
       shutil.copyfile(script, dst_file)
+    dst_file = os.path.join(path, os.path.basename(exec_script))
+    shutil.copyfile(exec_script, dst_file)
+
+
+def fix_seed(seed):
+  random.seed(seed)
+  np.random.seed(seed)
+  cudnn.benchmark = False
+  torch.manual_seed(seed)
+  cudnn.enabled = True
+  cudnn.deterministic = True
+  torch.cuda.manual_seed(seed)
+
+
+def setup_logger(args):
+  # log_format = '%(asctime)s %(processName)-15s [%(filename)s:%(lineno)d] %(message)s'
+  log_format = '%(asctime)s %(processName)-15s %(message)s'
+  logging.basicConfig(stream=sys.stdout, level=logging.INFO,
+                      format=log_format, datefmt='%m/%d %I:%M:%S %p')
+  fh = logging.FileHandler(os.path.join(args.save, 'log.txt'))
+  fh.setFormatter(logging.Formatter(log_format))
+  logging.getLogger().addHandler(fh)
+
+
+def run_log_thread():
+    log_queue = multiprocessing.get_context('spawn').Queue()
+
+    def _handle_log():
+        while True:
+            record = log_queue.get()
+            if record is None:
+                break
+            logger = logging.getLogger(record.name)
+            logger.handle(record)
+
+    log_thread = threading.Thread(target=_handle_log, name='log_thread')
+    log_thread.start()
+
+    return log_thread, log_queue
 
