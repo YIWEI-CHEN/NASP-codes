@@ -79,4 +79,4 @@ AmoebaNet = Genotype(
 )
 
 NASP = Genotype(normal=[('conv_3x1_1x3', 0), ('conv 3x3', 1), ('dil_conv_3x3', 2), ('conv 3x3', 1), ('dil_conv_3x3', 2), ('conv 3x3', 0), ('skip_connect', 0), ('dil_conv_3x3', 3)], normal_concat=range(2, 6), reduce=[('max_pool_3x3', 0), ('max_pool_3x3', 1), ('skip_connect', 2), ('max_pool_5x5', 1), ('skip_connect', 2), ('skip_connect', 3), ('skip_connect', 0), ('skip_connect', 1)], reduce_concat=range(2, 6))
-
+SINGLE_NASP = Genotype(normal=[('conv_3x1_1x3', 0), ('conv 1x1', 1), ('conv 3x3', 1), ('conv 1x1', 0), ('dil_conv_3x3', 0), ('dil_conv_3x3', 3), ('conv_3x1_1x3', 1), ('sep_7x7', 3)], normal_concat=range(2, 6), reduce=[('max_pool_3x3', 1), ('max_pool_5x5', 0), ('skip_connect', 2), ('skip_connect', 0), ('skip_connect', 2), ('skip_connect', 3), ('skip_connect', 4), ('skip_connect', 2)], reduce_concat=range(2, 6))
