@@ -9,14 +9,12 @@ import logging
 import argparse
 import torch.nn as nn
 import torch.utils
-import torch.nn.functional as F
 import torchvision.datasets as dset
-import torch.backends.cudnn as cudnn
 
 from torch.autograd import Variable
 from model_search import Network
 from architect import Architect
-# from tensorboard_logger import configure, log_value
+from tensorboard_logger import configure, log_value
 import pdb
 
 
@@ -46,23 +44,23 @@ parser.add_argument('--name', type=str, default="runs", help='name for log')
 parser.add_argument('--debug', action='store_true', default=False, help='debug or not')
 parser.add_argument('--greedy', type=float, default=0, help='explore and exploitation')
 parser.add_argument('--l2', type=float, default=0, help='additional l2 regularization for alphas')
+parser.add_argument('--exec_script', type=str, default='scripts/search.sh', help='script to run exp')
 args = parser.parse_args()
 
 args.save = 'search-{}-{}'.format(args.save, time.strftime("%Y%m%d-%H%M%S"))
 if args.debug:
   args.save += "_debug"
-utils.create_exp_dir(args.save, scripts_to_save=glob.glob('*.py'))
+utils.create_exp_dir(args.save, scripts_to_save=glob.glob('*.py'), exec_script=args.exec_script)
 
-log_format = '%(asctime)s %(message)s'
-logging.basicConfig(stream=sys.stdout, level=logging.INFO,
-    format=log_format, datefmt='%m/%d %I:%M:%S %p')
-fh = logging.FileHandler(os.path.join(args.save, 'log.txt'))
-fh.setFormatter(logging.Formatter(log_format))
-logging.getLogger().addHandler(fh)
-# configure(args.save + "/%s"%(args.name))
+# Logging configuration
+utils.setup_logger(args)
 
+# tensorboard_logger configuration
+configure(args.save + "/%s"%(args.name))
 
 CIFAR_CLASSES = 10
+
+os.environ['CUDA_VISIBLE_DEVICES'] = str(args.gpu)
 
 
 def main():
@@ -70,12 +68,9 @@ def main():
     logging.info('no gpu device available')
     sys.exit(1)
 
-  np.random.seed(args.seed)
-  torch.cuda.set_device(args.gpu)
-  cudnn.benchmark = True
-  torch.manual_seed(args.seed)
-  cudnn.enabled=True
-  torch.cuda.manual_seed(args.seed)
+  # Fix seed
+  utils.fix_seed(args.seed)
+
   logging.info('gpu device = %d' % args.gpu)
   logging.info("args = %s", args)
 
@@ -116,7 +111,7 @@ def main():
   for epoch in range(args.epochs):
     scheduler.step()
     lr = scheduler.get_lr()[0]
-    #log_value("lr", lr, epoch)
+    log_value("lr", lr, epoch)
     logging.info('epoch %d lr %e', epoch, lr)
 
     genotype = model.genotype()
@@ -130,7 +125,7 @@ def main():
     logging.info("alphas_time %f ", alphas_time)
     logging.info("forward_time %f", forward_time)
     logging.info("backward_time %f", backward_time)
-    #log_value('train_acc', train_acc, epoch)
+    log_value('train_acc', train_acc, epoch)
     logging.info('train_acc %f', train_acc)
 
     # validation
@@ -138,7 +133,7 @@ def main():
     valid_acc, valid_obj = infer(valid_queue, model, criterion)
     end_time2 = time.time()
     logging.info("inference time %f", end_time2 - start_time2)
-    #log_value('valid_acc', valid_acc, epoch)
+    log_value('valid_acc', valid_acc, epoch)
     logging.info('valid_acc %f', valid_acc)
     logging.info('alphas_normal = %s', model.alphas_normal)
     logging.info('alphas_reduce = %s', model.alphas_reduce)
@@ -207,9 +202,9 @@ def infer(valid_queue, model, criterion):
 
     prec1, prec5 = utils.accuracy(logits, target, topk=(1, 5))
     n = input.size(0)
-    objs.update(loss.data[0], n)
-    top1.update(prec1.data[0], n)
-    top5.update(prec5.data[0], n)
+    objs.update(loss.data.item(), n)
+    top1.update(prec1.data.item(), n)
+    top5.update(prec5.data.item(), n)
 
     if step % args.report_freq == 0:
       logging.info('valid %03d %e %f %f', step, objs.avg, top1.avg, top5.avg)
