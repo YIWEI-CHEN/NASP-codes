@@ -152,6 +152,7 @@ def main_worker(gpu, ngpus_per_node, args, log_queue):
 
     for epoch in range(args.epochs):
       train_sampler.set_epoch(epoch)
+      scheduler.step()
       lr = scheduler.get_lr()[0]
       log_value("lr", lr, epoch)
       root.info('epoch %d lr %e', epoch, lr)
@@ -172,7 +173,7 @@ def main_worker(gpu, ngpus_per_node, args, log_queue):
 
       # remember best acc@1 and save checkpoint
       if args.rank == 0:
-        root.info('valid_acc %f, valid_obj %f', valid_obj, valid_obj)
+        root.info('valid_acc %f, valid_obj %f', valid_acc, valid_obj)
         root.info('test_acc %f, test_obj %f', test_acc, test_obj)
 
         is_best = valid_acc > best_acc1
