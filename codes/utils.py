@@ -1,5 +1,7 @@
 import logging
+import multiprocessing
 import sys
+import threading
 
 import random
 
@@ -146,3 +148,20 @@ def setup_logger(args):
   fh = logging.FileHandler(os.path.join(args.save, 'log.txt'))
   fh.setFormatter(logging.Formatter(log_format))
   logging.getLogger().addHandler(fh)
+
+
+def run_log_thread():
+    log_queue = multiprocessing.get_context('spawn').Queue()
+
+    def _handle_log():
+      while True:
+        record = log_queue.get()
+        if record is None:
+          break
+        logger = logging.getLogger(record.name)
+        logger.handle(record)
+
+    log_thread = threading.Thread(target=_handle_log, name='log_thread')
+    log_thread.start()
+
+    return log_thread, log_queue
