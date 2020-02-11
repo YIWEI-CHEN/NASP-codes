@@ -135,8 +135,8 @@ def train(train_queue, model, criterion, optimizer):
   model.train()
 
   for step, (input, target) in enumerate(train_queue):
-    input = input.cuda(args.gpu, non_blocking=True)
-    target = target.cuda(args.gpu, non_blocking=True)
+    input = input.cuda(non_blocking=True)
+    target = target.cuda(non_blocking=True)
 
     optimizer.zero_grad()
     logits, logits_aux = model(input)
@@ -168,8 +168,8 @@ def infer(valid_queue, model, criterion):
   model.eval()
 
   for step, (input, target) in enumerate(valid_queue):
-    input = input.cuda(args.gpu, non_blocking=True)
-    target = target.cuda(args.gpu, non_blocking=True)
+    input = input.cuda(non_blocking=True)
+    target = target.cuda(non_blocking=True)
 
     logits, _ = model(input)
     loss = criterion(logits, target)
