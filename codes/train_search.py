@@ -7,25 +7,20 @@ import time
 import glob
 import numpy as np
 import torch
-import utils
 import logging
 import logging.handlers
 import argparse
 import torch.nn as nn
 import torch.utils
-import torch.nn.functional as F
 import torchvision.datasets as dset
 import torch.distributed as dist
-import torch.backends.cudnn as cudnn
 import torch.multiprocessing as mp
+from torch.utils import data
+from tensorboard_logger import configure, log_value
 
-from torch.autograd import Variable
+import utils
 from model_search import Network
 from architect import Architect
-# from tensorboard_logger import configure, log_value
-import pdb
-
-from torch.utils import data
 
 parser = argparse.ArgumentParser("cifar")
 parser.add_argument('--data', type=str, default='../data', help='location of the data corpus')
@@ -70,6 +65,7 @@ parser.add_argument('--eta', type=float, default=1.0, help="the weight for avera
 parser.add_argument('--mu', type=float, default=0.0, help="the weight for regularized difference")
 
 CIFAR_CLASSES = 10
+
 
 def main():
   try:
@@ -126,6 +122,9 @@ def main_worker(gpu, ngpus_per_node, args, log_queue):
     dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url,
                             world_size=args.world_size, rank=args.rank)
 
+    # tensorboard_logger configuration
+    configure('{}/{}_{}'.format(args.save, args.name, args.rank))
+
     # define loss function (criterion)
     criterion = nn.CrossEntropyLoss().cuda(args.gpu)
 
@@ -164,8 +163,8 @@ def main_worker(gpu, ngpus_per_node, args, log_queue):
     best_acc = 0
     for epoch in range(args.epochs):
       scheduler.step()
-      # lr = adjust_learning_rate(optimizer, epoch, args)
       lr = scheduler.get_lr()[0]
+      log_value("lr", lr, epoch)
       root.info('epoch %d lr %e', epoch, lr)
 
       genotype = model.genotype()
@@ -174,12 +173,13 @@ def main_worker(gpu, ngpus_per_node, args, log_queue):
       # training
       start_time = time.time()
       train_acc, train_obj, alphas_time, forward_time, backward_time = \
-        train(train_queue, valid_queue, model, architect, criterion, optimizer, lr, args)
+        train(train_queue, valid_queue, model, optimizer, args, epoch)
       end_time = time.time()
       root.info('train time: {}'.format(end_time - start_time))
       root.info("alpha_time: {}".format(alphas_time))
       root.info("forward_time: {}".format(forward_time))
       root.info("backward_time: {}".format(backward_time))
+      log_value('train_acc', train_acc, epoch)
       root.info("train_acc: {}".format(train_acc))
 
       # validation
@@ -191,6 +191,7 @@ def main_worker(gpu, ngpus_per_node, args, log_queue):
         best_acc = max(valid_acc, best_acc)
 
         root.info("inference time %f", end_time2 - start_time2)
+        log_value('valid_acc', valid_acc, epoch)
         root.info('valid_acc %f', valid_acc)
 
         utils.save(model, os.path.join(args.save, 'weights.pt'))
@@ -198,15 +199,16 @@ def main_worker(gpu, ngpus_per_node, args, log_queue):
           root.info('Epoch {} produces best valid_acc {}, best arch:\n{}'.format(
             epoch, best_acc, genotype
           ))
-      root.info('alphas_normal = %s', model.alphas_normal)
-      root.info('alphas_reduce = %s', model.alphas_reduce)
+
+        root.info('alphas_normal = %s', model.alphas_normal)
+        root.info('alphas_reduce = %s', model.alphas_reduce)
 
   except Exception as e:
     root.error(e)
     dist.destroy_process_group()
 
 
-def train(train_queue, valid_queue, model, architect, criterion, optimizer, lr, args):
+def train(train_queue, valid_queue, model, optimizer, args, epoch):
   root = logging.getLogger()
   rank = args.rank
   objs = utils.AvgrageMeter()
@@ -217,6 +219,7 @@ def train(train_queue, valid_queue, model, architect, criterion, optimizer, lr, 
   backward_time = 0
   arch_dimension = sum([a.numel() for a in model.arch_parameters()])
   weight_dimension = sum([w.numel() for w in model.parameters()])
+  total_batchs = len(train_queue)
 
   model.train()
   for step, (inputs, targets) in enumerate(train_queue):
@@ -228,8 +231,7 @@ def train(train_queue, valid_queue, model, architect, criterion, optimizer, lr, 
     target_search = target_search.cuda(args.gpu, non_blocking=True)
 
     # compute local arch grad
-    local_arch_grad, _, _, _, _, _ = \
-      get_local_gradient(model, input_search, target_search, args.arch_weight_decay, "alphas")
+    local_arch_grad = get_arch_gradient(model, input_search, target_search)
     # send to rank 0
     # root.info('before reducing local_arch_grad: {}'.format(local_arch_grad[0:5]))
     dist.reduce(local_arch_grad, 0)
@@ -274,7 +276,7 @@ def train(train_queue, valid_queue, model, architect, criterion, optimizer, lr, 
 
     # compute local weight grad
     local_weight_grad, loss, prec1, prec5, _forward_time, _backward_time \
-      = get_local_gradient(model, inputs, targets, args.weight_decay, "weights")
+      = get_weight_gradient(model, inputs, targets)
     forward_time += _forward_time
     backward_time += _backward_time
     # send to rank 0
@@ -294,6 +296,8 @@ def train(train_queue, valid_queue, model, architect, criterion, optimizer, lr, 
     # weight_grad = local_weight_grad  # should comment out
     model.update_weight_grad(weight_grad)
     nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+
+    # update weights
     optimizer.step()
     model.clip()
 
@@ -302,12 +306,19 @@ def train(train_queue, valid_queue, model, architect, criterion, optimizer, lr, 
     top5.update(prec5.item(), n)
 
     if step % args.report_freq == 0:
-      logging.info('train %03d %e %f %f', step, objs.avg, top1.avg, top5.avg)
+      root.info('train %03d %e %f %f', step, objs.avg, top1.avg, top5.avg)
+      mapping = {0: 'normal', 1: 'reduce'}
+      _step = epoch * total_batchs + step
+      for i, arch in enumerate(model.arch_parameters()):
+        cell = mapping[i]
+        log_arch(cell, arch, _step)
 
   return top1.avg, objs.avg, alphas_time, forward_time, backward_time
 
 
 def infer(valid_queue, model, criterion, args):
+  root = logging.getLogger()
+
   objs = utils.AvgrageMeter()
   top1 = utils.AvgrageMeter()
   top5 = utils.AvgrageMeter()
@@ -327,7 +338,7 @@ def infer(valid_queue, model, criterion, args):
     top5.update(prec5.data.item(), n)
 
     if step % args.report_freq == 0:
-      logging.info('valid %03d %e %f %f', step, objs.avg, top1.avg, top5.avg)
+      root.info('valid %03d %e %f %f', step, objs.avg, top1.avg, top5.avg)
 
   model.restore()
   return top1.avg, objs.avg
@@ -375,47 +386,42 @@ def get_train_validation_loader(args):
   return train_queue, valid_queue, all_valid_queue
 
 
-def adjust_learning_rate(optimizer, epoch, args):
-  """Sets the learning rate to the initial LR decayed by 10 every 30 epochs"""
-  lr = args.learning_rate * (0.1 ** (epoch // 30))
-  for param_group in optimizer.param_groups:
-    param_group['lr'] = lr
-  return lr
+def _concat(xs):
+  return torch.cat([x.reshape(-1, 1) for x in xs], dim=0)
 
 
-def get_local_gradient(model, inputs, targets, weight_decay, update_type):
-  total_inputs = inputs.size(0)
-
+def get_weight_gradient(model, inputs, targets):
+  """
+  After reading SGD code in pytorch, I will not
+    1. Add weight decay to gradient
+  """
+  # binarize arch parameters
   model.binarization()
 
-  # compute loss
+  # forward, compute loss
   begin = time.time()
-  logits = model(inputs, updateType=update_type)
+  logits = model(inputs, updateType="weights")
   loss = model._criterion(logits, targets)
   forward_time = time.time() - begin
-  prec1, prec5 = utils.accuracy(logits, targets, topk=(1, 5))
 
-  # get gradient
+  # backward, get gradient
   model.zero_grad()
   begin = time.time()
   loss.backward()
   backward_time = time.time() - begin
-  var = model.arch_parameters() if update_type == "alphas" else model.parameters()
-  local_gradient = torch.cat(
-    [v.grad.reshape(-1, 1) if v.grad is not None else torch.zeros_like(v).reshape(-1, 1) for v in var],
-    dim=0).data * 1.0 / total_inputs
 
+  # flat gradient to a n-dim vector
+  flat_gradient = torch.cat(
+    [v.grad.reshape(-1, 1) if v.grad is not None else torch.zeros_like(v).reshape(-1, 1) for v in  model.parameters()],
+    dim=0).data * 1.0 / inputs.size(0)
+
+  # restore arch parameters
   model.restore()
 
-  # weight decay
-  if update_type == 'alphas' and weight_decay != 0:
-    var = model.arch_parameters()
-    weights = torch.cat(
-      [v.reshape(-1, 1) if v.grad is not None else torch.zeros_like(v).reshape(-1, 1) for v in var],
-      dim=0).data
-    local_gradient += weight_decay * weights
+  # performance
+  prec1, prec5 = utils.accuracy(logits, targets, topk=(1, 5))
 
-  return local_gradient, loss, prec1, prec5, forward_time, backward_time
+  return flat_gradient, loss, prec1, prec5, forward_time, backward_time
 
 
 def get_InexactDANE_subproblem_solution(model, arch_grad, inputs, targets, args):
@@ -428,20 +434,24 @@ def get_InexactDANE_subproblem_solution(model, arch_grad, inputs, targets, args)
   total_inputs = inputs.size(0)
   sample_indices = np.random.choice(total_inputs, subproblem_maximum_iterations)
 
-  arch_weights = torch.cat([a.reshape(-1, 1) for a in model.arch_parameters()], dim=0).data
-  new_arch_weights = deepcopy(arch_weights)
-  exp_avg = torch.zeros_like(arch_weights)
-  exp_avg_sq = torch.zeros_like(arch_weights)
+  arch_parameters = _concat(model.arch_parameters()).data
+  new_arch_parameters = deepcopy(arch_parameters)
+  exp_avg = torch.zeros_like(arch_parameters)
+  exp_avg_sq = torch.zeros_like(arch_parameters)
 
   for step, idx in enumerate(sample_indices):
     end = idx + sub_batch_size
-    sample_input, sample_targets = inputs[idx:end], targets[idx:end]
-    sample_arch_grad = get_arch_gradient_on_sample(model, arch_weights, sample_input, sample_targets,
-                                                  args.arch_weight_decay)
-    sample_new_arch_grad = get_arch_gradient_on_sample(model, new_arch_weights, sample_input, sample_targets,
-                                            args.arch_weight_decay)
-    update_direction = sample_new_arch_grad - sample_arch_grad + args.eta * sub_batch_size * arch_grad \
-                       + args.mu * (new_arch_weights - arch_weights)
+    sample_inputs, sample_targets = inputs[idx:end], targets[idx:end]
+    # gradient of current arch
+    sample_arch_grad = get_arch_gradient(
+      model, sample_inputs, sample_targets, args.arch_weight_decay, arch_parameters)
+    # gradient of updated arch
+    sample_new_arch_grad = get_arch_gradient(
+      model, sample_inputs, sample_targets, args.arch_weight_decay, new_arch_parameters)
+    # compute updated direction
+    update_direction = sample_new_arch_grad - sample_arch_grad + \
+                       args.eta * arch_grad + args.mu * (new_arch_parameters - arch_parameters)
+    # Use Adam to update new arch
     exp_avg.mul_(beta1).add_(1 - beta1, update_direction)
     exp_avg_sq.mul_(beta2).addcmul_(1 - beta2, update_direction, update_direction)
     denom = exp_avg_sq.sqrt().add_(eps)
@@ -449,28 +459,60 @@ def get_InexactDANE_subproblem_solution(model, arch_grad, inputs, targets, args)
     bias_correction1 = 1 - beta1 ** (step + 1)
     bias_correction2 = 1 - beta2 ** (step + 1)
     step_size = args.arch_learning_rate * math.sqrt(bias_correction2) / bias_correction1
-    new_arch_weights.addcdiv_(-step_size, exp_avg, denom)
+    new_arch_parameters.addcdiv_(-step_size, exp_avg, denom)
 
-  return new_arch_weights
+  return new_arch_parameters
 
 
-def get_arch_gradient_on_sample(model, arch_weights, input_, target_, arch_weight_decay):
-  model.update_arch(arch_weights, replace=False)
+def get_arch_gradient(model, input_, target_, arch_weight_decay=0.0, arch_parameter=None):
+  # use specified arch values
+  if arch_parameter is not None:
+    model.update_arch(arch_parameter, replace=False)
 
+  # binarize arch parameters
   model.binarization()
+
+  # loss
   loss = model._loss(input_, target_, updateType="alphas")
+
+  # arch gradient
   grad = torch.autograd.grad(loss, model.arch_parameters())
-  flat_grad = torch.cat([g.reshape(-1, 1) for g in grad], dim=0).data * 1.0 / input_.size(0)
+
+  # flat grad
+  flat_grad = _concat(grad).data * 1.0 / input_.size(0)
+
+  # restore from binarization
   model.restore(usage='binary')
 
   # weight decay
   if arch_weight_decay != 0:
-    weights = torch.cat([a.reshape(-1, 1) for a in model.arch_parameters()], dim=0).data
+    weights = _concat(model.arch_parameters()).data
     flat_grad += arch_weight_decay * weights
 
-  model.restore(usage='svrg')
+  # restore from svrg usage
+  if arch_parameter is not None:
+    model.restore(usage='svrg')
 
   return flat_grad
+
+
+def log_arch(cell, arch, step):
+  root = logging.getLogger()
+  root.info('{} param min {:.4f}, max {:.4f}, mean {:.4f}, std {:.4f}'.format(
+    cell, arch.min(), arch.max(), arch.mean(), arch.std()))
+  root.info('{} param: {}'.format(cell, arch))
+  log_value('{}_min'.format(cell), arch.min(), step)
+  log_value('{}_max'.format(cell), arch.max(), step)
+  log_value('{}_mean'.format(cell), arch.mean(), step)
+  log_value('{}_std'.format(cell), arch.std(), step)
+
+  root.info('{} grad min {:.4f}, max {:.4f}, mean {:.4f}, std {:.4f}'.format(
+    cell, arch.grad.min(), arch.grad.max(), arch.grad.mean(), arch.grad.std()))
+  root.info('{} grad: {}'.format(cell, arch.grad))
+  log_value('{}_grad_min'.format(cell), arch.grad.min(), step)
+  log_value('{}_grad_max'.format(cell), arch.grad.max(), step)
+  log_value('{}_grad_mean'.format(cell), arch.grad.mean(), step)
+  log_value('{}_grad_std'.format(cell), arch.grad.std(), step)
 
 
 if __name__ == '__main__':
