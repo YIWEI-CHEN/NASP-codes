@@ -152,7 +152,6 @@ def main_worker(gpu, ngpus_per_node, args, log_queue):
 
     for epoch in range(args.epochs):
       train_sampler.set_epoch(epoch)
-      scheduler.step()
       lr = scheduler.get_lr()[0]
       log_value("lr", lr, epoch)
       root.info('epoch %d lr %e', epoch, lr)
@@ -170,6 +169,9 @@ def main_worker(gpu, ngpus_per_node, args, log_queue):
       # evaluate on test set
       test_acc, test_obj = infer(test_queue, model, criterion, args)
       log_value('test_acc', test_acc, epoch)
+
+      # update learning rate
+      scheduler.step()
 
       # remember best acc@1 and save checkpoint
       if args.rank == 0:
