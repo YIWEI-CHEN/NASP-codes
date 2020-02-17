@@ -24,7 +24,8 @@ from architect import Architect
 
 parser = argparse.ArgumentParser("cifar")
 parser.add_argument('--data', type=str, default='../data', help='location of the data corpus')
-parser.add_argument('--batch_size', type=int, default=64, help='batch size')
+parser.add_argument('--train_batch_size', type=int, default=68, help='train batch size')
+parser.add_argument('--valid_batch_size', type=int, default=72, help='valid batch size')
 parser.add_argument('--learning_rate', type=float, default=0.025, help='init learning rate')
 parser.add_argument('--learning_rate_min', type=float, default=0.001, help='min learning rate')
 parser.add_argument('--momentum', type=float, default=0.9, help='momentum')
@@ -43,7 +44,7 @@ parser.add_argument('--seed', type=int, default=2, help='random seed')
 parser.add_argument('--grad_clip', type=float, default=5, help='gradient clipping')
 parser.add_argument('--train_portion', type=float, default=0.5, help='portion of training data')
 parser.add_argument('--arch_learning_rate', type=float, default=3e-4, help='learning rate for arch encoding')
-parser.add_argument('--arch_weight_decay', type=float, default=1e-2, help='weight decay for arch encoding')
+parser.add_argument('--arch_weight_decay', type=float, default=1e-5, help='weight decay for arch encoding')
 parser.add_argument('--name', type=str, default="runs", help='name for log')
 parser.add_argument('--debug', action='store_true', default=False, help='debug or not')
 parser.add_argument('--greedy', type=float, default=0, help='explore and exploitation')
@@ -59,11 +60,11 @@ parser.add_argument('--rank', default=-1, type=int,
                     help='node rank for distributed training')
 parser.add_argument('-j', '--workers', default=1, type=int, metavar='N',
                     help='number of data loading workers (default: 1)')
-parser.add_argument('--subproblem_iteration_portion', type=float, default=1.0,
+parser.add_argument('--subproblem_batch_ratio', type=float, default=0.25,
                     help='the portion of samples used for subproblem')
 parser.add_argument('--eta', type=float, default=1.0, help="the weight for average gradient")
-parser.add_argument('--mu', type=float, default=0.0, help="the weight for regularized difference")
-
+parser.add_argument('--mu', type=float, default=0.1, help="the weight for regularized difference")
+parser.add_argument('--subproblem_maximum_iterations', type=int, default=5, help='num of subproblem_maximum_iterations')
 CIFAR_CLASSES = 10
 
 
@@ -148,7 +149,8 @@ def main_worker(gpu, ngpus_per_node, args, log_queue):
     # When using a single GPU per process and per
     # DistributedDataParallel, we need to divide the batch size
     # ourselves based on the total number of GPUs we have
-    args.batch_size = int(args.batch_size / ngpus_per_node)
+    args.train_batch_size = int(args.train_batch_size / ngpus_per_node)
+    args.valid_batch_size = int(args.valid_batch_size / ngpus_per_node)
     args.workers = int((args.workers + ngpus_per_node - 1) / ngpus_per_node)
 
     # Meta architecture
@@ -162,7 +164,6 @@ def main_worker(gpu, ngpus_per_node, args, log_queue):
 
     best_acc = 0
     for epoch in range(args.epochs):
-      scheduler.step()
       lr = scheduler.get_lr()[0]
       log_value("lr", lr, epoch)
       root.info('epoch %d lr %e', epoch, lr)
@@ -199,9 +200,12 @@ def main_worker(gpu, ngpus_per_node, args, log_queue):
           root.info('Epoch {} produces best valid_acc {}, best arch:\n{}'.format(
             epoch, best_acc, genotype
           ))
+        # root.info('alphas_normal = %s', model.alphas_normal)
+        # root.info('alphas_reduce = %s', model.alphas_reduce)
 
-        root.info('alphas_normal = %s', model.alphas_normal)
-        root.info('alphas_reduce = %s', model.alphas_reduce)
+      # update learning rate
+      scheduler.step()
+
 
   except Exception as e:
     root.error(e)
@@ -231,7 +235,7 @@ def train(train_queue, valid_queue, model, optimizer, args, epoch):
     target_search = target_search.cuda(args.gpu, non_blocking=True)
 
     # compute local arch grad
-    local_arch_grad = get_arch_gradient(model, input_search, target_search)
+    local_arch_grad = get_arch_gradient(model, input_search, target_search, arch_weight_decay=args.arch_weight_decay)
     # send to rank 0
     # root.info('before reducing local_arch_grad: {}'.format(local_arch_grad[0:5]))
     dist.reduce(local_arch_grad, 0)
@@ -263,10 +267,15 @@ def train(train_queue, valid_queue, model, optimizer, args, epoch):
     # root.info('after broadcasting new_arch_parameters: {}'.format(new_arch_parameters[0:5]))
 
     # update the architecture parameters
-    root.info('Updating arch parameters')
+    # root.info('Updating arch parameters')
     model.update_arch(new_arch_parameters, replace=True)
     end1 = time.time()
     alphas_time += end1 - begin1
+
+    if args.rank == 0 and step % args.report_freq == 0:
+      _step = epoch * total_batchs + step
+      log_arch('normal', model.alphas_normal, _step)
+      log_arch('reduce', model.alphas_reduce, _step)
 
     # fix arch and update weights
     n = inputs.size(0)
@@ -307,11 +316,6 @@ def train(train_queue, valid_queue, model, optimizer, args, epoch):
 
     if step % args.report_freq == 0:
       root.info('train %03d %e %f %f', step, objs.avg, top1.avg, top5.avg)
-      mapping = {0: 'normal', 1: 'reduce'}
-      _step = epoch * total_batchs + step
-      for i, arch in enumerate(model.arch_parameters()):
-        cell = mapping[i]
-        log_arch(cell, arch, _step)
 
   return top1.avg, objs.avg, alphas_time, forward_time, backward_time
 
@@ -362,12 +366,12 @@ def get_train_validation_loader(args):
                                 range(split + local_num_valid * args.rank,
                                       split + local_num_valid * (args.rank + 1)))
   train_queue = torch.utils.data.DataLoader(
-    local_train_set, batch_size=args.batch_size,
+    local_train_set, batch_size=args.train_batch_size,
     num_workers=args.workers, pin_memory=True, shuffle=True)
   train_queue.size = local_num_train
 
   valid_queue = torch.utils.data.DataLoader(
-    local_valid_set, batch_size=args.batch_size,
+    local_valid_set, batch_size=args.valid_batch_size,
     num_workers=args.workers, pin_memory=True, shuffle=True)
   valid_queue.name = 'local_valid'
   valid_queue.size = local_num_valid
@@ -376,7 +380,7 @@ def get_train_validation_loader(args):
     all_valid_set = data.Subset(train_data,
                                 range(split, num_train))
     all_valid_queue = torch.utils.data.DataLoader(
-      all_valid_set, batch_size=args.batch_size * args.world_size,
+      all_valid_set, batch_size=args.valid_batch_size * args.world_size,
       num_workers=args.workers, pin_memory=True, shuffle=True)
     all_valid_queue.size = split
     all_valid_queue.name = 'all_valid'
@@ -429,8 +433,8 @@ def get_InexactDANE_subproblem_solution(model, arch_grad, inputs, targets, args)
   beta1 = 0.9
   beta2 = 0.999
   eps = 1e-8
-  subproblem_maximum_iterations = 50
-  sub_batch_size = int(inputs.size(0) / 4)
+  subproblem_maximum_iterations = args.subproblem_maximum_iterations
+  sub_batch_size = int(inputs.size(0) * args.subproblem_batch_ratio)
   total_inputs = inputs.size(0)
   sample_indices = np.random.choice(total_inputs, subproblem_maximum_iterations)
 
@@ -465,6 +469,9 @@ def get_InexactDANE_subproblem_solution(model, arch_grad, inputs, targets, args)
 
 
 def get_arch_gradient(model, input_, target_, arch_weight_decay=0.0, arch_parameter=None):
+  # set arch gradient zero
+  model.zero_arch_grad()
+
   # use specified arch values
   if arch_parameter is not None:
     model.update_arch(arch_parameter, replace=False)
@@ -478,16 +485,18 @@ def get_arch_gradient(model, input_, target_, arch_weight_decay=0.0, arch_parame
   # arch gradient
   grad = torch.autograd.grad(loss, model.arch_parameters())
 
-  # flat grad
-  flat_grad = _concat(grad).data * 1.0 / input_.size(0)
-
   # restore from binarization
   model.restore(usage='binary')
 
-  # weight decay
-  if arch_weight_decay != 0:
-    weights = _concat(model.arch_parameters()).data
-    flat_grad += arch_weight_decay * weights
+  for i, arch in enumerate(model.arch_parameters()):
+    # weight decay
+    if arch_weight_decay != 0:
+      arch.grad = grad[i] * 1.0 / input_.size(0) + arch_weight_decay * arch.data
+    else:
+      arch.grad = grad[i] * 1.0 / input_.size(0)
+
+  # flat grad
+  flat_grad = _concat([arch.grad for arch in model.arch_parameters()]).data
 
   # restore from svrg usage
   if arch_parameter is not None:
@@ -508,7 +517,7 @@ def log_arch(cell, arch, step):
 
   root.info('{} grad min {:.4f}, max {:.4f}, mean {:.4f}, std {:.4f}'.format(
     cell, arch.grad.min(), arch.grad.max(), arch.grad.mean(), arch.grad.std()))
-  root.info('{} grad: {}'.format(cell, arch.grad))
+  # root.info('{} grad: {}'.format(cell, arch.grad))
   log_value('{}_grad_min'.format(cell), arch.grad.min(), step)
   log_value('{}_grad_max'.format(cell), arch.grad.max(), step)
   log_value('{}_grad_mean'.format(cell), arch.grad.mean(), step)

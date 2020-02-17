@@ -267,3 +267,8 @@ class Network(nn.Module):
     )
     return genotype
 
+  def zero_arch_grad(self):
+    for arch in self._arch_parameters:
+      if arch.grad is not None:
+        arch.grad.detach_()
+        arch.grad.zero_()
