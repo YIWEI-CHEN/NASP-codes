@@ -10,7 +10,7 @@ import shutil
 import torchvision.transforms as transforms
 from torch.autograd import Variable
 from torch.backends import cudnn
-
+import torchvision.datasets as dset
 
 class AvgrageMeter(object):
 
@@ -146,3 +146,27 @@ def setup_logger(args):
   fh = logging.FileHandler(os.path.join(args.save, 'log.txt'))
   fh.setFormatter(logging.Formatter(log_format))
   logging.getLogger().addHandler(fh)
+
+
+def get_train_validation_loader(args):
+  train_transform, valid_transform = _data_transforms_cifar10(args)
+  train_data = dset.CIFAR10(root=args.data, train=True, download=True, transform=train_transform)
+
+  num_train = len(train_data)
+  indices = list(range(num_train))
+  split = int(np.floor(args.train_portion * num_train))
+
+  # train[0:split] as training data
+  train_sampler = torch.utils.data.sampler.SubsetRandomSampler(indices[:split])
+  train_queue = torch.utils.data.DataLoader(
+    train_data, batch_size=args.train_batch_size,
+    num_workers=args.workers, pin_memory=True, sampler=train_sampler)
+
+  # train[split:] as validation data
+  valid_sampler = torch.utils.data.sampler.SubsetRandomSampler(indices[split:])
+  valid_queue = torch.utils.data.DataLoader(
+    train_data, batch_size=args.valid_batch_size,
+    num_workers=args.workers, pin_memory=True, sampler=valid_sampler)
+  valid_queue.name = 'valid'
+
+  return train_queue, train_sampler, valid_queue
