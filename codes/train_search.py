@@ -223,14 +223,14 @@ def train(train_queue, valid_queue, model, optimizer, args, epoch):
   backward_time = 0
   arch_dimension = sum([a.numel() for a in model.arch_parameters()])
   # weight_dimension = sum([w.numel() for w in model.parameters()])
-  total_batchs = len(train_queue)
+  total_batchs = len(valid_queue)
 
   model.train()
-  for step, (inputs, targets) in enumerate(train_queue):
+  for step, (input_search, target_search) in enumerate(valid_queue):
     begin1 = time.time()
     # fix weights and update arch
     # architect.step(input, target, input_search, target_search, lr, optimizer)
-    input_search, target_search = next(iter(valid_queue))
+    # input_search, target_search = next(iter(valid_queue))
     input_search = input_search.cuda(args.gpu, non_blocking=True)
     target_search = target_search.cuda(args.gpu, non_blocking=True)
 
@@ -278,6 +278,7 @@ def train(train_queue, valid_queue, model, optimizer, args, epoch):
       log_arch('reduce', model.alphas_reduce, _step)
 
     # fix arch and update weights
+    inputs, targets = next(iter(train_queue))
     n = inputs.size(0)
     inputs = inputs.cuda(args.gpu, non_blocking=True)
     targets = targets.cuda(args.gpu, non_blocking=True)
