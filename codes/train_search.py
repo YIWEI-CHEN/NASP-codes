@@ -149,7 +149,7 @@ def main_worker(gpu, ngpus_per_node, args, log_queue):
     # When using a single GPU per process and per
     # DistributedDataParallel, we need to divide the batch size
     # ourselves based on the total number of GPUs we have
-    args.train_batch_size = int(args.train_batch_size / ngpus_per_node)
+    args.train_batch_size = int(args.train_batch_size)
     args.valid_batch_size = int(args.valid_batch_size / ngpus_per_node)
     args.workers = int((args.workers + ngpus_per_node - 1) / ngpus_per_node)
 
@@ -222,7 +222,7 @@ def train(train_queue, valid_queue, model, optimizer, args, epoch):
   forward_time = 0
   backward_time = 0
   arch_dimension = sum([a.numel() for a in model.arch_parameters()])
-  weight_dimension = sum([w.numel() for w in model.parameters()])
+  # weight_dimension = sum([w.numel() for w in model.parameters()])
   total_batchs = len(train_queue)
 
   model.train()
@@ -282,33 +282,51 @@ def train(train_queue, valid_queue, model, optimizer, args, epoch):
     inputs = inputs.cuda(args.gpu, non_blocking=True)
     targets = targets.cuda(args.gpu, non_blocking=True)
     optimizer.zero_grad()
+    model.binarization()
+
+    # forward
+    begin2 = time.time()
+    logits = model(inputs)
+    end2 = time.time()
+    forward_time += end2 - begin2
+    loss = model._criterion(logits, targets)
+
+    # backward
+    begin3 = time.time()
+    loss.backward()
+    end3 = time.time()
+    backward_time += end3 - begin3
 
     # compute local weight grad
-    local_weight_grad, loss, prec1, prec5, _forward_time, _backward_time \
-      = get_weight_gradient(model, inputs, targets)
-    forward_time += _forward_time
-    backward_time += _backward_time
+    # local_weight_grad, loss, prec1, prec5, _forward_time, _backward_time \
+    #   = get_weight_gradient(model, inputs, targets)
+    # forward_time += _forward_time
+    # backward_time += _backward_time
     # send to rank 0
     # root.info('before reducing local_weight_grad: {}'.format(local_weight_grad[0:5]))
-    dist.reduce(local_weight_grad, 0)
+    # dist.reduce(local_weight_grad, 0)
 
     # average local_weight_grad
-    if rank == 0:
-      weight_grad = local_weight_grad * 1.0 / args.world_size
-    else:
-      weight_grad = torch.zeros(weight_dimension, 1, device=args.gpu)
+    # if rank == 0:
+    #   weight_grad = local_weight_grad * 1.0 / args.world_size
+    # else:
+    #   weight_grad = torch.zeros(weight_dimension, 1, device=args.gpu)
 
     # sync weight_grad from rank 0
-    dist.broadcast(weight_grad, 0)
+    # dist.broadcast(weight_grad, 0)
     # root.info('after broadcasting weight_grad: {}'.format(weight_grad[0:5]))
 
     # weight_grad = local_weight_grad  # should comment out
-    model.update_weight_grad(weight_grad)
+    # model.update_weight_grad(weight_grad)
     nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
 
     # update weights
+    model.restore()
     optimizer.step()
     model.clip()
+
+    # track performance
+    prec1, prec5 = utils.accuracy(logits, targets, topk=(1, 5))
 
     objs.update(loss.item(), n)
     top1.update(prec1.item(), n)
@@ -356,10 +374,14 @@ def get_train_validation_loader(args):
   split = int(np.floor(args.train_portion * num_train))
   num_valid = num_train - split
 
-  local_num_train = int(math.ceil(1.0 * split / args.world_size))
+  # local_num_train = int(math.ceil(1.0 * split / args.world_size))
+  # local_train_set = data.Subset(train_data,
+  #                               range(local_num_train * args.rank,
+  #                                     local_num_train * (args.rank + 1)))
+  local_num_train = split
   local_train_set = data.Subset(train_data,
-                                range(local_num_train * args.rank,
-                                      local_num_train * (args.rank + 1)))
+                                range(0,
+                                      local_num_train))
 
   local_num_valid = int(math.ceil(1.0 * num_valid / args.world_size))
   local_valid_set = data.Subset(train_data,
