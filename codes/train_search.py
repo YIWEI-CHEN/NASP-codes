@@ -109,6 +109,8 @@ def main():
     root.info('genotype = %s', genotype)
 
     # training
+    architect.alpha_forward = 0
+    architect.alpha_backward = 0
     start_time = time.time()
     train_acc, train_obj, alphas_time, forward_time, backward_time = \
       train(train_queue, valid_queue, model, architect, criterion, optimizer, lr, epoch)
@@ -117,6 +119,8 @@ def main():
     root.info("alphas_time %f ", alphas_time)
     root.info("forward_time %f", forward_time)
     root.info("backward_time %f", backward_time)
+    root.info("alpha_forward %f", architect.alpha_forward)
+    root.info("alpha_backward %f", architect.alpha_backward)
     log_value('train_acc', train_acc, epoch)
     root.info('train_acc %f', train_acc)
 
@@ -254,7 +258,7 @@ def log_arch(cell, arch, step):
 
   root.info('{} grad min {:.4f}, max {:.4f}, mean {:.4f}, std {:.4f}'.format(
     cell, arch.grad.min(), arch.grad.max(), arch.grad.mean(), arch.grad.std()))
-  root.info('{} grad: {}'.format(cell, arch.grad))
+  # root.info('{} grad: {}'.format(cell, arch.grad))
   log_value('{}_grad_min'.format(cell), arch.grad.min(), step)
   log_value('{}_grad_max'.format(cell), arch.grad.max(), step)
   log_value('{}_grad_mean'.format(cell), arch.grad.mean(), step)

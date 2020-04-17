@@ -1,3 +1,5 @@
+import time
+
 import torch
 import numpy as np
 import torch.nn as nn
@@ -24,6 +26,19 @@ class Architect(object):
 
   def _backward_step(self, input_valid, target_valid, updateType):
     self.model.binarization()
+
+    begin = time.time()
     loss = self.model._loss(input_valid, target_valid, updateType)
-    loss.backward()
+    end = time.time()
+    self.alpha_forward += end - begin
+
+    begin = time.time()
+    # loss.backward()
+    grad = torch.autograd.grad(loss, self.model.arch_parameters())
+    for i, arch in enumerate(self.model.arch_parameters()):
+        arch.grad = grad[i]
+
+    end = time.time()
+    self.alpha_backward += end - begin
+
     self.model.restore()
