@@ -25,7 +25,7 @@ from architect import Architect
 parser = argparse.ArgumentParser("cifar")
 parser.add_argument('--data', type=str, default='../data', help='location of the data corpus')
 parser.add_argument('--train_batch_size', type=int, default=68, help='train batch size')
-parser.add_argument('--valid_batch_size', type=int, default=72, help='valid batch size')
+parser.add_argument('--valid_batch_size', type=int, default=68, help='valid batch size')
 parser.add_argument('--learning_rate', type=float, default=0.025, help='init learning rate')
 parser.add_argument('--learning_rate_min', type=float, default=0.001, help='min learning rate')
 parser.add_argument('--momentum', type=float, default=0.9, help='momentum')
@@ -173,13 +173,21 @@ def main_worker(gpu, ngpus_per_node, args, log_queue):
 
       # training
       start_time = time.time()
-      train_acc, train_obj, alphas_time, forward_time, backward_time = \
+      train_acc, train_obj, alphas_time, forward_time, backward_time, arch_grad_time, subproblem_time, comm_time, \
+        alpha_forward, alpha_backward, sub_alpha_forward, sub_alpha_backward = \
         train(train_queue, valid_queue, model, optimizer, args, epoch)
       end_time = time.time()
       root.info('train time: {}'.format(end_time - start_time))
       root.info("alpha_time: {}".format(alphas_time))
       root.info("forward_time: {}".format(forward_time))
       root.info("backward_time: {}".format(backward_time))
+      root.info("arch_grad_time: {}".format(arch_grad_time))
+      root.info("subproblem_time: {}".format(subproblem_time))
+      root.info("comm_time: {}".format(comm_time))
+      root.info("alpha_forward: {}".format(alpha_forward))
+      root.info("alpha_backward: {}".format(alpha_backward))
+      root.info("sub_alpha_forward: {}".format(sub_alpha_forward))
+      root.info("sub_alpha_backward: {}".format(sub_alpha_backward))
       log_value('train_acc', train_acc, epoch)
       root.info("train_acc: {}".format(train_acc))
 
@@ -221,6 +229,13 @@ def train(train_queue, valid_queue, model, optimizer, args, epoch):
   alphas_time = 0
   forward_time = 0
   backward_time = 0
+  comm_time = 0
+  subproblem_time = 0
+  arch_grad_time = 0
+  alpha_forward = 0
+  alpha_backward = 0
+  sub_alpha_forward = 0
+  sub_alpha_backward = 0
   arch_dimension = sum([a.numel() for a in model.arch_parameters()])
   # weight_dimension = sum([w.numel() for w in model.parameters()])
   total_batchs = len(valid_queue)
@@ -235,7 +250,12 @@ def train(train_queue, valid_queue, model, optimizer, args, epoch):
     target_search = target_search.cuda(args.gpu, non_blocking=True)
 
     # compute local arch grad
-    local_arch_grad = get_arch_gradient(model, input_search, target_search, arch_weight_decay=args.arch_weight_decay)
+    local_arch_grad, _alpha_forward, _alpha_backward = get_arch_gradient(
+      model, input_search, target_search, arch_weight_decay=args.arch_weight_decay)
+    alpha_forward += _alpha_forward
+    alpha_backward += _alpha_backward
+    arch_grad_end = time.time()
+    arch_grad_time += arch_grad_end - begin1
     # send to rank 0
     # root.info('before reducing local_arch_grad: {}'.format(local_arch_grad[0:5]))
     dist.reduce(local_arch_grad, 0)
@@ -248,10 +268,17 @@ def train(train_queue, valid_queue, model, optimizer, args, epoch):
 
     # sync arch_grad from rank 0
     dist.broadcast(arch_grad, 0)
+    comm_end = time.time()
+    comm_time += comm_end - arch_grad_end
     # root.info('after broadcasting arch_grad: {}'.format(arch_grad[0:5]))
 
     # compute local solution of subproblem of InexactDANE
-    local_subproblem_solution = get_InexactDANE_subproblem_solution(model, arch_grad, input_search, target_search, args)
+    local_subproblem_solution, _alpha_forward, _alpha_backward = get_InexactDANE_subproblem_solution(
+      model, arch_grad, input_search, target_search, args)
+    sub_alpha_forward += _alpha_forward
+    sub_alpha_backward += _alpha_backward
+    subproblem_end = time.time()
+    subproblem_time += subproblem_end - comm_end
     # send to rank 0
     # root.info('before reducing local_subproblem_solution: {}'.format(local_subproblem_solution[0:5]))
     dist.reduce(local_subproblem_solution, 0)
@@ -264,6 +291,7 @@ def train(train_queue, valid_queue, model, optimizer, args, epoch):
 
     # sync new_arch_parameters from rank 0
     dist.broadcast(new_arch_parameters, 0)
+    comm_time += time.time() - subproblem_end
     # root.info('after broadcasting new_arch_parameters: {}'.format(new_arch_parameters[0:5]))
 
     # update the architecture parameters
@@ -336,7 +364,8 @@ def train(train_queue, valid_queue, model, optimizer, args, epoch):
     if step % args.report_freq == 0:
       root.info('train %03d %e %f %f', step, objs.avg, top1.avg, top5.avg)
 
-  return top1.avg, objs.avg, alphas_time, forward_time, backward_time
+  return top1.avg, objs.avg, alphas_time, forward_time, backward_time, arch_grad_time, subproblem_time, comm_time, \
+         alpha_forward, alpha_backward, sub_alpha_forward, sub_alpha_backward
 
 
 def infer(valid_queue, model, criterion, args):
@@ -466,18 +495,26 @@ def get_InexactDANE_subproblem_solution(model, arch_grad, inputs, targets, args)
   exp_avg = torch.zeros_like(arch_parameters)
   exp_avg_sq = torch.zeros_like(arch_parameters)
 
+  alpha_backward = 0
+  alpha_forward = 0
+
   for step, idx in enumerate(sample_indices):
     end = idx + sub_batch_size
     sample_inputs, sample_targets = inputs[idx:end], targets[idx:end]
     # gradient of current arch
-    sample_arch_grad = get_arch_gradient(
-      model, sample_inputs, sample_targets, args.arch_weight_decay, arch_parameters)
+    sample_arch_grad, _alpha_forward, _alpha_backward = get_arch_gradient(
+      model, sample_inputs, sample_targets, args.arch_weight_decay)
+    alpha_forward += _alpha_forward
+    alpha_backward += _alpha_backward
     # gradient of updated arch
-    sample_new_arch_grad = get_arch_gradient(
+    sample_new_arch_grad, _alpha_forward, _alpha_backward = get_arch_gradient(
       model, sample_inputs, sample_targets, args.arch_weight_decay, new_arch_parameters)
+    alpha_forward += _alpha_forward
+    alpha_backward += _alpha_backward
     # compute updated direction
     update_direction = sample_new_arch_grad - sample_arch_grad + \
                        args.eta * arch_grad + args.mu * (new_arch_parameters - arch_parameters)
+    # update_direction = arch_grad
     # Use Adam to update new arch
     exp_avg.mul_(beta1).add_(1 - beta1, update_direction)
     exp_avg_sq.mul_(beta2).addcmul_(1 - beta2, update_direction, update_direction)
@@ -488,7 +525,7 @@ def get_InexactDANE_subproblem_solution(model, arch_grad, inputs, targets, args)
     step_size = args.arch_learning_rate * math.sqrt(bias_correction2) / bias_correction1
     new_arch_parameters.addcdiv_(-step_size, exp_avg, denom)
 
-  return new_arch_parameters
+  return new_arch_parameters, alpha_forward, alpha_backward
 
 
 def get_arch_gradient(model, input_, target_, arch_weight_decay=0.0, arch_parameter=None):
@@ -503,10 +540,16 @@ def get_arch_gradient(model, input_, target_, arch_weight_decay=0.0, arch_parame
   model.binarization()
 
   # loss
+  begin = time.time()
   loss = model._loss(input_, target_, updateType="alphas")
+  end = time.time()
+  alpha_forward = end - begin
 
   # arch gradient
+  begin = time.time()
   grad = torch.autograd.grad(loss, model.arch_parameters())
+  end = time.time()
+  alpha_backward = end - begin
 
   # restore from binarization
   model.restore(usage='binary')
@@ -525,7 +568,7 @@ def get_arch_gradient(model, input_, target_, arch_weight_decay=0.0, arch_parame
   if arch_parameter is not None:
     model.restore(usage='svrg')
 
-  return flat_grad
+  return flat_grad, alpha_forward, alpha_backward
 
 
 def log_arch(cell, arch, step):
