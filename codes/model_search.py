@@ -116,6 +116,8 @@ class Network(nn.Module):
     model_new = Network(self._C, self._num_classes, self._layers, self._criterion).cuda(self.gpu)
     for x, y in zip(model_new.arch_parameters(), self.arch_parameters()):
         x.data.copy_(y.data)
+    old_model_dict = self.state_dict()
+    model_new.load_state_dict(old_model_dict)  # copy weights and stuff
     return model_new
 
   def forward(self, input, updateType="weights"):
@@ -132,7 +134,7 @@ class Network(nn.Module):
 
   def _loss(self, input, target, updateType):
     logits = self(input, updateType)
-    return self._criterion(logits, target) + self._l2_loss()
+    return self._criterion(logits, target)
   
   def _l2_loss(self):
     normal_burden = []
