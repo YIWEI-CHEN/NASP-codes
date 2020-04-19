@@ -178,16 +178,16 @@ def main_worker(gpu, ngpus_per_node, args, log_queue):
         train(train_queue, valid_queue, model, optimizer, args, epoch)
       end_time = time.time()
       root.info('train time: {}'.format(end_time - start_time))
-      root.info("alpha_time: {}".format(alphas_time))
-      root.info("forward_time: {}".format(forward_time))
-      root.info("backward_time: {}".format(backward_time))
-      root.info("arch_grad_time: {}".format(arch_grad_time))
-      root.info("subproblem_time: {}".format(subproblem_time))
-      root.info("comm_time: {}".format(comm_time))
-      root.info("alpha_forward: {}".format(alpha_forward))
-      root.info("alpha_backward: {}".format(alpha_backward))
-      root.info("sub_alpha_forward: {}".format(sub_alpha_forward))
-      root.info("sub_alpha_backward: {}".format(sub_alpha_backward))
+      root.info("alpha_time: {}".format(alphas_time * 0.001))
+      root.info("forward_time: {}".format(forward_time * 0.001))
+      root.info("backward_time: {}".format(backward_time * 0.001))
+      root.info("arch_grad_time: {}".format(arch_grad_time * 0.001))
+      root.info("subproblem_time: {}".format(subproblem_time * 0.001))
+      root.info("comm_time: {}".format(comm_time * 0.001))
+      root.info("alpha_forward: {}".format(alpha_forward * 0.001))
+      root.info("alpha_backward: {}".format(alpha_backward * 0.001))
+      root.info("sub_alpha_forward: {}".format(sub_alpha_forward * 0.001))
+      root.info("sub_alpha_backward: {}".format(sub_alpha_backward * 0.001))
       log_value('train_acc', train_acc, epoch)
       root.info("train_acc: {}".format(train_acc))
 
@@ -241,8 +241,15 @@ def train(train_queue, valid_queue, model, optimizer, args, epoch):
   total_batchs = len(valid_queue)
 
   model.train()
+
+  begin1 = torch.cuda.Event(enable_timing=True)
+  arch_grad_end = torch.cuda.Event(enable_timing=True)
+  comm_end = torch.cuda.Event(enable_timing=True)
+  subproblem_end = torch.cuda.Event(enable_timing=True)
+  end1 = torch.cuda.Event(enable_timing=True)
+
   for step, (input_search, target_search) in enumerate(valid_queue):
-    begin1 = time.time()
+    begin1.record()
     # fix weights and update arch
     # architect.step(input, target, input_search, target_search, lr, optimizer)
     # input_search, target_search = next(iter(valid_queue))
@@ -254,11 +261,13 @@ def train(train_queue, valid_queue, model, optimizer, args, epoch):
       model, input_search, target_search, arch_weight_decay=args.arch_weight_decay)
     alpha_forward += _alpha_forward
     alpha_backward += _alpha_backward
-    arch_grad_end = time.time()
-    arch_grad_time += arch_grad_end - begin1
+    arch_grad_end.record()
+    torch.cuda.synchronize()
+    arch_grad_time += begin1.elapsed_time(arch_grad_end)
     # send to rank 0
     # root.info('before reducing local_arch_grad: {}'.format(local_arch_grad[0:5]))
-    dist.reduce(local_arch_grad, 0)
+    if not args.debug:
+      dist.reduce(local_arch_grad, 0)
 
     # average local_arch_grad
     if rank == 0:
@@ -267,9 +276,11 @@ def train(train_queue, valid_queue, model, optimizer, args, epoch):
       arch_grad = torch.zeros(arch_dimension, 1, device=args.gpu)
 
     # sync arch_grad from rank 0
-    dist.broadcast(arch_grad, 0)
-    comm_end = time.time()
-    comm_time += comm_end - arch_grad_end
+    if not args.debug:
+      dist.broadcast(arch_grad, 0)
+    comm_end.record()
+    torch.cuda.synchronize()
+    comm_time += arch_grad_end.elapsed_time(comm_end)
     # root.info('after broadcasting arch_grad: {}'.format(arch_grad[0:5]))
 
     # compute local solution of subproblem of InexactDANE
@@ -277,11 +288,13 @@ def train(train_queue, valid_queue, model, optimizer, args, epoch):
       model, arch_grad, input_search, target_search, args)
     sub_alpha_forward += _alpha_forward
     sub_alpha_backward += _alpha_backward
-    subproblem_end = time.time()
-    subproblem_time += subproblem_end - comm_end
+    subproblem_end.record()
+    torch.cuda.synchronize()
+    subproblem_time += comm_end.elapsed_time(subproblem_end)
     # send to rank 0
     # root.info('before reducing local_subproblem_solution: {}'.format(local_subproblem_solution[0:5]))
-    dist.reduce(local_subproblem_solution, 0)
+    if not args.debug:
+      dist.reduce(local_subproblem_solution, 0)
 
     # average local_subproblem_solution
     if rank == 0:
@@ -290,15 +303,19 @@ def train(train_queue, valid_queue, model, optimizer, args, epoch):
       new_arch_parameters = torch.zeros(arch_dimension, 1, device=args.gpu)
 
     # sync new_arch_parameters from rank 0
-    dist.broadcast(new_arch_parameters, 0)
-    comm_time += time.time() - subproblem_end
+    if not args.debug:
+      dist.broadcast(new_arch_parameters, 0)
+    comm_end.record()
+    torch.cuda.synchronize()
+    comm_time += subproblem_end.elapsed_time(comm_end)
     # root.info('after broadcasting new_arch_parameters: {}'.format(new_arch_parameters[0:5]))
 
     # update the architecture parameters
     # root.info('Updating arch parameters')
     model.update_arch(new_arch_parameters, replace=True)
-    end1 = time.time()
-    alphas_time += end1 - begin1
+    end1.record()
+    torch.cuda.synchronize()
+    alphas_time += begin1.elapsed_time(end1)
 
     if args.rank == 0 and step % args.report_freq == 0:
       _step = epoch * total_batchs + step
@@ -314,17 +331,19 @@ def train(train_queue, valid_queue, model, optimizer, args, epoch):
     model.binarization()
 
     # forward
-    begin2 = time.time()
+    begin1.record()
     logits = model(inputs)
-    end2 = time.time()
-    forward_time += end2 - begin2
     loss = model._criterion(logits, targets)
+    end1.record()
+    torch.cuda.synchronize()
+    forward_time += begin1.elapsed_time(end1)
 
     # backward
-    begin3 = time.time()
+    begin1.record()
     loss.backward()
-    end3 = time.time()
-    backward_time += end3 - begin3
+    end1.record()
+    torch.cuda.synchronize()
+    backward_time += begin1.elapsed_time(end1)
 
     # compute local weight grad
     # local_weight_grad, loss, prec1, prec5, _forward_time, _backward_time \
@@ -540,16 +559,20 @@ def get_arch_gradient(model, input_, target_, arch_weight_decay=0.0, arch_parame
   model.binarization()
 
   # loss
-  begin = time.time()
+  begin = torch.cuda.Event(enable_timing=True)
+  end = torch.cuda.Event(enable_timing=True)
+  begin.record()
   loss = model._loss(input_, target_, updateType="alphas")
-  end = time.time()
-  alpha_forward = end - begin
+  end.record()
+  torch.cuda.synchronize()
+  alpha_forward = begin.elapsed_time(end)
 
   # arch gradient
-  begin = time.time()
+  begin.record()
   grad = torch.autograd.grad(loss, model.arch_parameters())
-  end = time.time()
-  alpha_backward = end - begin
+  end.record()
+  torch.cuda.synchronize()
+  alpha_backward = begin.elapsed_time(end)
 
   # restore from binarization
   model.restore(usage='binary')
