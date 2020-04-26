@@ -3,18 +3,20 @@ import torch.nn as nn
 
 OPS = {
   "skip_connect" : lambda C, stride, affine: Identity() if stride == 1 else FactorizedReduce(C, C, affine=affine),
-  "conv_3x1_1x3" : lambda C, stride, affine: nn.Sequential(
-    nn.ReLU(inplace=False),
-    nn.Conv2d(C, C, (1,3), stride=(1, stride), padding=(0, 1), bias=False),
-    nn.Conv2d(C, C, (3,1), stride=(stride, 1), padding=(1, 0), bias=False),
-    nn.BatchNorm2d(C, affine=affine)
-    ),
-  "conv_7x1_1x7" : lambda C, stride, affine: nn.Sequential(
-    nn.ReLU(inplace=False),
-    nn.Conv2d(C, C, (1,7), stride=(1, stride), padding=(0, 3), bias=False),
-    nn.Conv2d(C, C, (7,1), stride=(stride, 1), padding=(3, 0), bias=False),
-    nn.BatchNorm2d(C, affine=affine)
-    ),
+  "conv_3x1_1x3" : lambda C, stride, affine: ConvN11N(C, 3, stride, 1, affine),
+  "conv_7x1_1x7" : lambda C, stride, affine: ConvN11N(C, 7, stride, 3, affine),
+  # "conv_3x1_1x3" : lambda C, stride, affine: nn.Sequential(
+  #   nn.ReLU(inplace=False),
+  #   nn.Conv2d(C, C, (1,3), stride=(1, stride), padding=(0, 1), bias=False),
+  #   nn.Conv2d(C, C, (3,1), stride=(stride, 1), padding=(1, 0), bias=False),
+  #   nn.BatchNorm2d(C, affine=affine)
+  #   ),
+  # "conv_7x1_1x7" : lambda C, stride, affine: nn.Sequential(
+  #   nn.ReLU(inplace=False),
+  #   nn.Conv2d(C, C, (1,7), stride=(1, stride), padding=(0, 3), bias=False),
+  #   nn.Conv2d(C, C, (7,1), stride=(stride, 1), padding=(3, 0), bias=False),
+  #   nn.BatchNorm2d(C, affine=affine)
+  #   ),
   "dil_conv_3x3" : lambda C, stride, affine: DilConv(C, C, 3, stride, 2, 2, affine=affine),
   "dil_conv_5x5" : lambda C, stride, affine: DilConv(C, C, 5, stride, 4, 2, affine=affine),
   "avg_pool_3x3" : lambda C, stride, affine: nn.AvgPool2d(3, stride=stride, padding=1, count_include_pad=False),
@@ -28,6 +30,20 @@ OPS = {
   "sep_7x7" : lambda C, stride, affine: SepConv(C, C, 7, stride, 3, affine=affine),
 }
 
+
+class ConvN11N(nn.Module):
+
+  def __init__(self, C, kernel_size, stride, padding, affine=True):
+    super(ConvN11N, self).__init__()
+    self.op = nn.Sequential(
+      nn.ReLU(inplace=False),
+      nn.Conv2d(C, C, (1, kernel_size), stride=(1, stride), padding=(0, padding), bias=False),
+      nn.Conv2d(C, C, (kernel_size, 1), stride=(stride, 1), padding=(padding, 0), bias=False),
+      nn.BatchNorm2d(C, affine=affine)
+    )
+
+  def forward(self, x):
+    return self.op(x)
 
 
 class ReLUConvBN(nn.Module):
