@@ -159,6 +159,8 @@ def train(train_queue, valid_queue, model, architect, criterion, optimizer, lr, 
   backward_time = 0
   model.train()
   total_batchs = len(train_queue)
+  begin = torch.cuda.Event(enable_timing=True)
+  end = torch.cuda.Event(enable_timing=True)
 
   for step, (input, target) in enumerate(train_queue):
     n = input.size(0)
@@ -182,17 +184,17 @@ def train(train_queue, valid_queue, model, architect, criterion, optimizer, lr, 
     model.binarization()
 
     # forward
-    begin2 = time.time()
+    begin.record()
     logits = model(input)
-    end2 = time.time()
-    forward_time += end2 - begin2
     loss = criterion(logits, target)
+    end.record()
+    forward_time += utils.get_elaspe_time(begin, end)
 
     # backward
-    begin3 = time.time()
+    begin.record()
     loss.backward()
-    end3 = time.time()
-    backward_time += end3 - begin3
+    end.record()
+    backward_time += utils.get_elaspe_time(begin, end)
 
     # update weights
     model.restore()

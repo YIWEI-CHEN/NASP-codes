@@ -170,3 +170,8 @@ def get_train_validation_loader(args):
   valid_queue.name = 'valid'
 
   return train_queue, train_sampler, valid_queue
+
+
+def get_elaspe_time(begin, end):
+  torch.cuda.synchronize()
+  return begin.elapsed_time(end) / 1000.0
