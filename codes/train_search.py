@@ -111,6 +111,8 @@ def main():
     # training
     architect.alpha_forward = 0
     architect.alpha_backward = 0
+    architect.alpha_forward_cpu = 0
+    architect.alpha_backward_cpu = 0
     start_time = time.time()
     train_acc, train_obj, alphas_time, forward_time, backward_time = \
       train(train_queue, valid_queue, model, architect, criterion, optimizer, lr, epoch)
@@ -121,6 +123,8 @@ def main():
     root.info("backward_time %f", backward_time)
     root.info("alpha_forward %f", architect.alpha_forward)
     root.info("alpha_backward %f", architect.alpha_backward)
+    root.info("alpha_forward_cpu %f", architect.alpha_forward_cpu)
+    root.info("alpha_backward_cpu %f", architect.alpha_backward_cpu)
     log_value('train_acc', train_acc, epoch)
     root.info('train_acc %f', train_acc)
 

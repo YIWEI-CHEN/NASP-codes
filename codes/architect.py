@@ -1,3 +1,4 @@
+import re
 import time
 
 import torch
@@ -9,6 +10,13 @@ from torch.autograd import Variable
 def _concat(xs):
   return torch.cat([x.view(-1) for x in xs])
 
+
+def get_gpu_time(prof):
+  m = re.search("(?<=CUDA time total:) ([0-9]{1,4}\.[0-9]{1,4})(ms|s)", str(prof))
+  unit = m.group(2)
+  if unit == 'ms':
+    return float(m.group(1)) / 1000.0
+  return float(m.group(1))
 
 class Architect(object):
 
@@ -27,18 +35,25 @@ class Architect(object):
   def _backward_step(self, input_valid, target_valid, updateType):
     self.model.binarization()
 
-    begin = time.time()
-    loss = self.model._loss(input_valid, target_valid, updateType)
-    end = time.time()
-    self.alpha_forward += end - begin
+    with torch.autograd.profiler.profile(use_cuda=True) as forward_prof:
+      # begin = time.time()
+      loss = self.model._loss(input_valid, target_valid, updateType)
+      # end = time.time()
+      # self.alpha_forward += end - begin
 
-    begin = time.time()
-    # loss.backward()
-    grad = torch.autograd.grad(loss, self.model.arch_parameters())
-    for i, arch in enumerate(self.model.arch_parameters()):
+    # print(forward_prof.key_averages().table(sort_by="cuda_time_total"))]
+    self.alpha_forward_cpu += forward_prof.self_cpu_time_total / 1e6
+    self.alpha_forward += get_gpu_time(forward_prof)
+
+    with torch.autograd.profiler.profile(use_cuda=True) as backward_prof:
+      # begin = time.time()
+      grad = torch.autograd.grad(loss, self.model.arch_parameters())
+      for i, arch in enumerate(self.model.arch_parameters()):
         arch.grad = grad[i]
-
-    end = time.time()
-    self.alpha_backward += end - begin
+      # end = time.time()
+      # self.alpha_backward += end - begin
+    self.alpha_backward_cpu += backward_prof.self_cpu_time_total / 1e6
+    self.alpha_backward += get_gpu_time(backward_prof)
+    # print(backward_prof.key_averages().table(sort_by="cuda_time_total"))
 
     self.model.restore()
