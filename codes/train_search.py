@@ -93,6 +93,7 @@ def main():
 
   # Data loading code
   train_queue, train_sampler, valid_queue = utils.get_train_validation_loader(args)
+  test_queue = utils.get_test_loader(args)
 
   scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, float(args.epochs), eta_min=args.learning_rate_min)
@@ -131,10 +132,14 @@ def main():
     root.info("inference time %f", end_time2 - start_time2)
     log_value('valid_acc', valid_acc, epoch)
     root.info('valid_acc %f', valid_acc)
-    root.info('alphas_normal = %s', model.alphas_normal)
-    root.info('alphas_reduce = %s', model.alphas_reduce)
 
-    utils.save(model, os.path.join(args.save, 'weights.pt'))
+    # test
+    start = time.time()
+    test_acc, test_obj = infer(test_queue, model, criterion)
+    end = time.time()
+    root.info("inference time %f", end - start)
+    log_value('test_acc', test_acc, epoch)
+    root.info('test_acc %f, test_obj %f', test_acc, test_obj)
 
     # update learning rate
     scheduler.step()
@@ -142,10 +147,11 @@ def main():
     is_best = valid_acc > best_acc
     best_acc = max(valid_acc, best_acc)
     if is_best:
-      root.info('best valid_acc: {} at Epoch {}'.format(
-        best_acc, epoch
+      root.info('best valid_acc: {} at epoch: {}, test_acc: {}'.format(
+        best_acc, epoch, test_acc
       ))
-      root.info('Current best genotype = {}'.format(genotype))
+      root.info('Current best genotype = {}'.format(model.genotype()))
+      utils.save(model, os.path.join(args.save, 'best_weights.pt'))
 
 
 def train(train_queue, valid_queue, model, architect, criterion, optimizer, lr, epoch):
@@ -212,6 +218,7 @@ def train(train_queue, valid_queue, model, architect, criterion, optimizer, lr, 
 
     if step % args.report_freq == 0:
       root.info('train %03d %e %f %f', step, objs.avg, top1.avg, top5.avg)
+      # root.info('step: {:03d} train_labels[0:5]: {}, valid_labels[0:5]: {}'.format(step, target[0:5], target_search[0:5]))
       mapping = {0: 'normal', 1: 'reduce'}
       _step = epoch * total_batchs + step
       for i, arch in enumerate(model.arch_parameters()):
@@ -243,7 +250,8 @@ def infer(valid_queue, model, criterion):
     top5.update(prec5.data.item(), n)
 
     if step % args.report_freq == 0:
-      root.info('valid %03d %e %f %f', step, objs.avg, top1.avg, top5.avg)
+      root.info('%s %03d %e %f %f', valid_queue.name, step, objs.avg, top1.avg, top5.avg)
+      # root.info('step: {:03d} valid_labels[0:5]: {}'.format(step, target[0:5]))
   model.restore()
   return top1.avg, objs.avg
 
@@ -268,5 +276,8 @@ def log_arch(cell, arch, step):
 
 
 if __name__ == '__main__':
-  main() 
-
+  root = logging.getLogger()
+  begin = time.time()
+  main()
+  end = time.time()
+  root.info('total search time: {} s'.format(end - begin))
