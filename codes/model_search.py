@@ -33,9 +33,10 @@ class MixedOp(nn.Module):
 
 class Cell(nn.Module):
 
-  def __init__(self, steps, multiplier, C_prev_prev, C_prev, C, reduction, reduction_prev):
+  def __init__(self, steps, multiplier, C_prev_prev, C_prev, C, reduction, reduction_prev, device):
     super(Cell, self).__init__()
     self.reduction = reduction
+    self.device = device
 
     if reduction_prev:
       self.preprocess0 = FactorizedReduce(C_prev_prev, C, affine=False)
@@ -53,8 +54,10 @@ class Cell(nn.Module):
         self._ops.append(op)
 
   def forward(self, s0, s1, weights, updateType):
-    s0 = self.preprocess0(s0)
-    s1 = self.preprocess1(s1)
+    weights = weights.to(self.device)
+
+    s0 = self.preprocess0(s0.to(self.device))
+    s1 = self.preprocess1(s1.to(self.device))
 
     states = [s0, s1]
     offset = 0
@@ -68,7 +71,7 @@ class Cell(nn.Module):
 
 class Network(nn.Module):
 
-  def __init__(self, C, num_classes, layers, criterion, greedy=0, l2=0, steps=4, multiplier=4, stem_multiplier=3):
+  def __init__(self, C, num_classes, layers, criterion, gpus, micro_batch_ratio, greedy=0, l2=0, steps=4, multiplier=4, stem_multiplier=3):
     super(Network, self).__init__()
     self._C = C
     self._num_classes = num_classes
@@ -78,29 +81,35 @@ class Network(nn.Module):
     self._l2 = l2
     self._steps = steps
     self._multiplier = multiplier
+    self._init_devices(gpus)
+    self._micro_batch_ratio = micro_batch_ratio
 
     C_curr = stem_multiplier*C
     self.stem = nn.Sequential(
       nn.Conv2d(3, C_curr, 3, padding=1, bias=False),
       nn.BatchNorm2d(C_curr)
     )
+    self.stem.to(self.devices[0])
  
     C_prev_prev, C_prev, C_curr = C_curr, C_curr, C
     self.cells = nn.ModuleList()
     reduction_prev = False
+    denom = layers // len(self.devices)
     for i in range(layers):
+      device = self.devices[i // denom]
       if i in [layers//3, 2*layers//3]:
         C_curr *= 2
         reduction = True
       else:
         reduction = False
-      cell = Cell(steps, multiplier, C_prev_prev, C_prev, C_curr, reduction, reduction_prev)
+      cell = Cell(steps, multiplier, C_prev_prev, C_prev, C_curr, reduction, reduction_prev, device)
+      cell.to(device)
       reduction_prev = reduction
       self.cells += [cell]
       C_prev_prev, C_prev = C_prev, multiplier*C_curr
 
-    self.global_pooling = nn.AdaptiveAvgPool2d(1)
-    self.classifier = nn.Linear(C_prev, num_classes)
+    self.global_pooling = nn.AdaptiveAvgPool2d(1).to(self.devices[-1])
+    self.classifier = nn.Linear(C_prev, num_classes).to(self.devices[-1])
 
     self._initialize_alphas()
     self.saved_params = []
@@ -109,7 +118,7 @@ class Network(nn.Module):
       self.saved_params.append(temp)
 
   def new(self):
-    model_new = Network(self._C, self._num_classes, self._layers, self._criterion).cuda()
+    model_new = Network(self._C, self._num_classes, self._layers, self._criterion)
     for x, y in zip(model_new.arch_parameters(), self.arch_parameters()):
         x.data.copy_(y.data)
     return model_new
@@ -128,7 +137,7 @@ class Network(nn.Module):
 
   def _loss(self, input, target, updateType):
     logits = self(input, updateType)
-    return self._criterion(logits, target) + self._l2_loss()
+    return self._criterion(logits, target)
   
   def _l2_loss(self):
     normal_burden = []
@@ -144,8 +153,8 @@ class Network(nn.Module):
     k = sum(1 for i in range(self._steps) for n in range(2+i))
     num_ops_normal = len(PRIMITIVES_NORMAL)
     num_ops_reduce = len(PRIMITIVES_REDUCE)
-    self.alphas_normal = Variable(torch.ones(k, num_ops_normal).cuda()/2, requires_grad=True)
-    self.alphas_reduce = Variable(torch.ones(k, num_ops_reduce).cuda()/2, requires_grad=True)
+    self.alphas_normal = Variable(torch.ones(k, num_ops_normal).cuda(self.devices[0])/2, requires_grad=True)
+    self.alphas_reduce = Variable(torch.ones(k, num_ops_reduce).cuda(self.devices[0])/2, requires_grad=True)
     self._arch_parameters = [
       self.alphas_normal,
       self.alphas_reduce,
@@ -181,31 +190,25 @@ class Network(nn.Module):
     for index in range(len(self._arch_parameters)):
       self._arch_parameters[index].data = self.proximal_step(self._arch_parameters[index])
 
-  def proximal_step(self, var, maxIndexs=None):
-    values = var.data.cpu().numpy()
-    m,n = values.shape
-    alphas = []
-    for i in range(m):
-      for j in range(n):
-        if j==maxIndexs[i]:
-          alphas.append(values[i][j].copy())
-          values[i][j]=1
-        else:
-          values[i][j]=0
+  def proximal_step(self, var, max_indexes):
+    m, n = var.shape
+    values = torch.zeros((m, n), dtype=torch.float32, device=self.devices[0])
+    alphas = var[torch.arange(m), max_indexes].data.cpu().numpy()
+
     step = 2
     cur = 0
-    while(cur<m):
+    active_rows = []
+    active_cols = []
+    while cur < m:
       cur_alphas = alphas[cur:cur+step]
-      reserve_index = [v[0] for v in sorted(list(zip(range(len(cur_alphas)), cur_alphas)), key=lambda x:x[1],
-                                            reverse=True)[:2]]
-      for index in range(cur,cur+step):
-        if (index - cur) in reserve_index:
-          continue
-        else:
-          values[index] = np.zeros(n)
+      cur_max_index = max_indexes[cur:cur+step]
+      sorted_alphas = sorted(list(zip(range(step), cur_alphas, cur_max_index)), key=lambda x:x[1], reverse=True)
+      active_rows.extend([v[0] + cur for v in sorted_alphas[:2]])
+      active_cols.extend([v[2] for v in sorted_alphas[:2]])
       cur = cur + step
       step += 1
-    return torch.Tensor(values).cuda()
+    values[active_rows, active_cols] = 1.0
+    return values
 
   def arch_parameters(self):
     return self._arch_parameters
@@ -240,3 +243,8 @@ class Network(nn.Module):
     )
     return genotype
 
+  def _init_devices(self, gpus):
+    num_gpus = len(gpus.split(','))
+    self.devices = []
+    for i in range(num_gpus):
+      self.devices.append(torch.device('cuda:{}'.format(i)))

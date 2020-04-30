@@ -19,12 +19,13 @@ import pdb
 parser = argparse.ArgumentParser("cifar")
 parser.add_argument('--data', type=str, default='../data', help='location of the data corpus')
 parser.add_argument('--batch_size', type=int, default=64, help='batch size')
+parser.add_argument('--micro_batch_ratio', type=float, default=0.5, help='micro batch size for pipeline parallel')
 parser.add_argument('--learning_rate', type=float, default=0.025, help='init learning rate')
 parser.add_argument('--learning_rate_min', type=float, default=0.001, help='min learning rate')
 parser.add_argument('--momentum', type=float, default=0.9, help='momentum')
 parser.add_argument('--weight_decay', type=float, default=3e-4, help='weight decay')
 parser.add_argument('--report_freq', type=float, default=50, help='report frequency')
-parser.add_argument('--gpu', type=int, default=0, help='gpu device id')
+parser.add_argument('--gpu', type=str, default="0", help='gpu device id (e.g., 0,1)')
 parser.add_argument('--epochs', type=int, default=50, help='num of training epochs')
 parser.add_argument('--init_channels', type=int, default=16, help='num of init channels')
 parser.add_argument('--layers', type=int, default=8, help='total number of layers')
@@ -76,13 +77,14 @@ def main():
   # Fix seed
   utils.fix_seed(args.seed)
 
-  root.info('gpu device = %d' % args.gpu)
+  root.info('gpu device = %s' % args.gpu)
   root.info("args = %s", args)
 
   criterion = nn.CrossEntropyLoss()
   criterion = criterion.cuda()
-  model = Network(args.init_channels, CIFAR_CLASSES, args.layers, criterion, args.greedy, args.l2)
-  model = model.cuda()
+  model = Network(args.init_channels, CIFAR_CLASSES, args.layers, criterion, args.gpu, args.micro_batch_ratio,
+                  args.greedy, args.l2)
+  # model = model.cuda()
   root.info("param size = %fMB", utils.count_parameters_in_MB(model))
 
   optimizer = torch.optim.SGD(
@@ -167,17 +169,19 @@ def train(train_queue, valid_queue, model, architect, criterion, optimizer, lr, 
   total_batchs = len(train_queue)
   begin = torch.cuda.Event(enable_timing=True)
   end = torch.cuda.Event(enable_timing=True)
+  first_device = model.devices[0]
+  last_device = model.devices[-1]
 
   for step, (input, target) in enumerate(train_queue):
     n = input.size(0)
     # input, target for weights
-    input = input.cuda(non_blocking=True)
-    target = target.cuda(non_blocking=True)
+    input = input.cuda(first_device, non_blocking=True)
+    target = target.cuda(last_device, non_blocking=True)
 
     # input, target for arch
     input_search, target_search = next(iter(valid_queue))
-    input_search = input_search.cuda(non_blocking=True)
-    target_search = target_search.cuda(non_blocking=True)
+    input_search = input_search.cuda(first_device, non_blocking=True)
+    target_search = target_search.cuda(last_device, non_blocking=True)
 
     # fix weight and update arch
     begin1 = time.time()
@@ -236,9 +240,12 @@ def infer(valid_queue, model, criterion):
   top5 = utils.AvgrageMeter()
   model.eval()
   model.binarization()
+  first_device = model.devices[0]
+  last_device = model.devices[-1]
+
   for step, (input, target) in enumerate(valid_queue):
-    input = input.cuda(non_blocking=True)
-    target = target.cuda(non_blocking=True)
+    input = input.cuda(first_device, non_blocking=True)
+    target = target.cuda(last_device, non_blocking=True)
 
     logits = model(input)
     loss = criterion(logits, target)
