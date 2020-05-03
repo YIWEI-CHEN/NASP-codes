@@ -94,9 +94,9 @@ class Network(nn.Module):
     C_prev_prev, C_prev, C_curr = C_curr, C_curr, C
     self.cells = nn.ModuleList()
     reduction_prev = False
-    denom = layers // len(self.devices)
+    self.layers_per_dev = layers // len(self.devices)
     for i in range(layers):
-      device = self.devices[i // denom]
+      device = self.devices[i // self.layers_per_dev]
       if i in [layers//3, 2*layers//3]:
         C_curr *= 2
         reduction = True
@@ -124,7 +124,25 @@ class Network(nn.Module):
     return model_new
 
   def forward(self, input, updateType="weights"):
-    s0 = s1 = self.stem(input)
+    split_size = int(input.size(0) * self._micro_batch_ratio)
+    splits = iter(input.split(split_size, dim=0))
+    s0 = s1 = self.stem(next(splits))
+
+    res = []
+    for s_next in splits:
+      # s0 = s1 = self.stem(s_next)
+      for i, cell in enumerate(self.cells):
+        if cell.reduction:
+          weights = self.alphas_reduce
+        else:
+          weights = self.alphas_normal
+        s0, s1 = s1, cell(s0, s1, weights, updateType)
+      out = self.global_pooling(s1)
+      res.append(self.classifier(out.view(out.size(0), -1)))
+
+      # it should run concurrently
+      s0 = s1 = self.stem(s_next)
+
     for i, cell in enumerate(self.cells):
       if cell.reduction:
         weights = self.alphas_reduce
@@ -132,7 +150,9 @@ class Network(nn.Module):
         weights = self.alphas_normal
       s0, s1 = s1, cell(s0, s1, weights, updateType)
     out = self.global_pooling(s1)
-    logits = self.classifier(out.view(out.size(0),-1))
+    res.append(self.classifier(out.view(out.size(0), -1)))
+
+    logits = torch.cat(res)
     return logits
 
   def _loss(self, input, target, updateType):
