@@ -181,31 +181,25 @@ class Network(nn.Module):
     for index in range(len(self._arch_parameters)):
       self._arch_parameters[index].data = self.proximal_step(self._arch_parameters[index])
 
-  def proximal_step(self, var, maxIndexs=None):
-    values = var.data.cpu().numpy()
-    m,n = values.shape
-    alphas = []
-    for i in range(m):
-      for j in range(n):
-        if j==maxIndexs[i]:
-          alphas.append(values[i][j].copy())
-          values[i][j]=1
-        else:
-          values[i][j]=0
+  def proximal_step(self, var, max_indexes=None):
+    m, n = var.shape
+    values = torch.zeros((m, n), dtype=torch.float32).cuda()
+    alphas = var[torch.arange(m), max_indexes].data.cpu().numpy()
+
     step = 2
     cur = 0
-    while(cur<m):
-      cur_alphas = alphas[cur:cur+step]
-      reserve_index = [v[0] for v in sorted(list(zip(range(len(cur_alphas)), cur_alphas)), key=lambda x:x[1],
-                                            reverse=True)[:2]]
-      for index in range(cur,cur+step):
-        if (index - cur) in reserve_index:
-          continue
-        else:
-          values[index] = np.zeros(n)
+    active_rows = []
+    active_cols = []
+    while cur < m:
+      cur_alphas = alphas[cur:cur + step]
+      cur_max_index = max_indexes[cur:cur + step]
+      sorted_alphas = sorted(list(zip(range(step), cur_alphas, cur_max_index)), key=lambda x: x[1], reverse=True)
+      active_rows.extend([v[0] + cur for v in sorted_alphas[:2]])
+      active_cols.extend([v[2] for v in sorted_alphas[:2]])
       cur = cur + step
       step += 1
-    return torch.Tensor(values).cuda()
+    values[active_rows, active_cols] = 1.0
+    return values
 
   def arch_parameters(self):
     return self._arch_parameters
