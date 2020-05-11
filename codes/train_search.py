@@ -109,7 +109,7 @@ def main():
     root.info('epoch %d lr %e', epoch, lr)
 
     genotype = model.genotype()
-    root.info('genotype = %s', genotype)
+    root.info('genotype = {}'.format('\n'.join(str(g) for g in genotype)))
 
     # training
     architect.alpha_forward = 0
@@ -126,7 +126,7 @@ def main():
     root.info("alpha_backward %f", architect.alpha_backward)
     log_value('train_acc', train_acc, epoch)
     root.info('train_acc %f', train_acc)
-
+    break
     # validation
     start_time2 = time.time()
     valid_acc, valid_obj = infer(valid_queue, model, criterion)
@@ -152,7 +152,7 @@ def main():
       root.info('best valid_acc: {} at epoch: {}, test_acc: {}'.format(
         best_acc, epoch, test_acc
       ))
-      root.info('Current best genotype = {}'.format(model.genotype()))
+      root.info('Current best genotype = {}'.format('\n'.join(str(g) for g in model.genotype())))
       utils.save(model, os.path.join(args.save, 'best_weights.pt'))
 
 
@@ -173,6 +173,8 @@ def train(train_queue, valid_queue, model, architect, criterion, optimizer, lr, 
   last_device = model.devices[-1]
 
   for step, (input, target) in enumerate(train_queue):
+    if step == 2:
+      break
     n = input.size(0)
     # input, target for weights
     input = input.cuda(first_device, non_blocking=True)
@@ -223,10 +225,12 @@ def train(train_queue, valid_queue, model, architect, criterion, optimizer, lr, 
     if step % args.report_freq == 0:
       root.info('train %03d %e %f %f', step, objs.avg, top1.avg, top5.avg)
       # root.info('step: {:03d} train_labels[0:5]: {}, valid_labels[0:5]: {}'.format(step, target[0:5], target_search[0:5]))
-      mapping = {0: 'normal', 1: 'reduce'}
       _step = epoch * total_batchs + step
       for i, arch in enumerate(model.arch_parameters()):
-        cell = mapping[i]
+        if i in [model._layers // 3, 2 * model._layers // 3]:
+          cell = 'reduce_{}'.format(i)
+        else:
+          cell = 'normal_{}'.format(i)
         log_arch(cell, arch, _step)
 
   return top1.avg, objs.avg, alphas_time, forward_time, backward_time
