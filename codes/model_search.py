@@ -9,6 +9,7 @@ from torch.autograd import Variable
 from genotypes import PRIMITIVES_NORMAL, PRIMITIVES_REDUCE, PARAMS
 from genotypes import Genotype
 import pdb
+import torch.cuda.nvtx as nvtx
 
 class MixedOp(nn.Module):
 
@@ -125,7 +126,9 @@ class Network(nn.Module):
     split_size = int(input.size(0) * self._micro_batch_ratio)
     splits = iter(input.split(split_size, dim=0))
     s_next = next(splits)
+    nvtx.range_push('stem:0')
     s0 = s1 = self.stem(s_next)
+    nvtx.range_pop()
     s0_prev, s1_prev = self._block_forward(s0, s1, updateType, 0)
 
     res = []
@@ -136,7 +139,9 @@ class Network(nn.Module):
       res.append(self.classifier(out.view(out.size(0), -1)))
 
       # it should run concurrently
+      nvtx.range_push('stem:1')
       s0 = s1 = self.stem(s_next)
+      nvtx.range_pop()
       s0_prev, s1_prev = self._block_forward(s0, s1, updateType, 0)
 
     for device_idx in range(1, len(self.devices)):
@@ -151,7 +156,9 @@ class Network(nn.Module):
     for i in range(device_idx * self.layers_per_dev, (device_idx + 1) * self.layers_per_dev):
       cell = self.cells[i]
       weights = self._arch_parameters[i]
+      nvtx.range_push('cell_{}'.format(i))
       s0, s1 = s1, cell(s0, s1, weights, updateType)
+      nvtx.range_pop()
     if device_idx != len(self.devices) - 1:
       device = self.devices[device_idx + 1]
       s0 = s0.to(device, non_blocking=True)

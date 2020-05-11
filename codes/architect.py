@@ -2,6 +2,7 @@ import torch
 import numpy as np
 import torch.nn as nn
 from torch.autograd import Variable
+import torch.cuda.nvtx as nvtx
 
 from utils import get_elaspe_time
 
@@ -30,13 +31,17 @@ class Architect(object):
     self.model.binarization()
 
     begin.record()
+    nvtx.range_push('alpha forward')
     loss = self.model._loss(input_valid, target_valid, updateType)
+    nvtx.range_pop()
     end.record()
     self.alpha_forward += get_elaspe_time(begin, end)
 
     begin.record()
     # loss.backward()
+    nvtx.range_push('alpha backward')
     grad = torch.autograd.grad(loss, self.model.arch_parameters())
+    nvtx.range_pop()
     for i, arch in enumerate(self.model.arch_parameters()):
         arch.grad = grad[i]
 

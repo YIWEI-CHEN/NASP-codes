@@ -8,6 +8,7 @@ import logging
 import argparse
 import torch.nn as nn
 import torch.utils
+import torch.cuda.nvtx as nvtx
 
 from torch.autograd import Variable
 from model_search import Network
@@ -172,66 +173,69 @@ def train(train_queue, valid_queue, model, architect, criterion, optimizer, lr, 
   first_device = model.devices[0]
   last_device = model.devices[-1]
 
-  for step, (input, target) in enumerate(train_queue):
-    if step == 2:
-      break
-    n = input.size(0)
-    # input, target for weights
-    input = input.cuda(first_device, non_blocking=True)
-    target = target.cuda(last_device, non_blocking=True)
+  with torch.autograd.profiler.emit_nvtx():
+    for step, (input, target) in enumerate(train_queue):
+      if step == 2:
+        break
+      n = input.size(0)
+      # input, target for weights
+      input = input.cuda(first_device, non_blocking=True)
+      target = target.cuda(last_device, non_blocking=True)
 
-    # input, target for arch
-    input_search, target_search = next(iter(valid_queue))
-    input_search = input_search.cuda(first_device, non_blocking=True)
-    target_search = target_search.cuda(last_device, non_blocking=True)
+      # input, target for arch
+      input_search, target_search = next(iter(valid_queue))
+      input_search = input_search.cuda(first_device, non_blocking=True)
+      target_search = target_search.cuda(last_device, non_blocking=True)
 
-    # fix weight and update arch
-    begin1 = time.time()
-    architect.step(input, target, input_search, target_search, lr, optimizer)
-    end1 = time.time()
-    alphas_time += end1 - begin1
+      # fix weight and update arch
+      begin1 = time.time()
+      nvtx.range_push('arch')
+      architect.step(input, target, input_search, target_search, lr, optimizer)
+      nvtx.range_pop()
+      end1 = time.time()
+      alphas_time += end1 - begin1
 
-    # fix arch and update weight
-    optimizer.zero_grad()
-    model.binarization()
+      # fix arch and update weight
+      optimizer.zero_grad()
+      model.binarization()
 
-    # forward
-    begin.record()
-    logits = model(input)
-    loss = criterion(logits, target)
-    end.record()
-    forward_time += utils.get_elaspe_time(begin, end)
+      # forward
+      begin.record()
+      logits = model(input)
+      loss = criterion(logits, target)
+      end.record()
+      forward_time += utils.get_elaspe_time(begin, end)
 
-    # backward
-    begin.record()
-    loss.backward()
-    end.record()
-    backward_time += utils.get_elaspe_time(begin, end)
+      # backward
+      begin.record()
+      loss.backward()
+      end.record()
+      backward_time += utils.get_elaspe_time(begin, end)
 
-    # update weights
-    model.restore()
-    nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
-    optimizer.step()
+      # update weights
+      model.restore()
+      nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+      optimizer.step()
 
-    # clip arch weigths
-    model.clip()
+      # clip arch weigths
+      model.clip()
 
-    # track performance
-    prec1, prec5 = utils.accuracy(logits, target, topk=(1, 5))
-    objs.update(loss.data.item(), n)
-    top1.update(prec1.data.item(), n)
-    top5.update(prec5.data.item(), n)
+      # track performance
+      prec1, prec5 = utils.accuracy(logits, target, topk=(1, 5))
+      objs.update(loss.data.item(), n)
+      top1.update(prec1.data.item(), n)
+      top5.update(prec5.data.item(), n)
 
-    if step % args.report_freq == 0:
-      root.info('train %03d %e %f %f', step, objs.avg, top1.avg, top5.avg)
-      # root.info('step: {:03d} train_labels[0:5]: {}, valid_labels[0:5]: {}'.format(step, target[0:5], target_search[0:5]))
-      _step = epoch * total_batchs + step
-      for i, arch in enumerate(model.arch_parameters()):
-        if i in [model._layers // 3, 2 * model._layers // 3]:
-          cell = 'reduce_{}'.format(i)
-        else:
-          cell = 'normal_{}'.format(i)
-        log_arch(cell, arch, _step)
+      if step % args.report_freq == 0:
+        root.info('train %03d %e %f %f', step, objs.avg, top1.avg, top5.avg)
+        # root.info('step: {:03d} train_labels[0:5]: {}, valid_labels[0:5]: {}'.format(step, target[0:5], target_search[0:5]))
+        _step = epoch * total_batchs + step
+        for i, arch in enumerate(model.arch_parameters()):
+          if i in [model._layers // 3, 2 * model._layers // 3]:
+            cell = 'reduce_{}'.format(i)
+          else:
+            cell = 'normal_{}'.format(i)
+          log_arch(cell, arch, _step)
 
   return top1.avg, objs.avg, alphas_time, forward_time, backward_time
 
