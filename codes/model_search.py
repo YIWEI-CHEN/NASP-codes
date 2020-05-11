@@ -7,6 +7,7 @@ from torch.autograd import Variable
 from genotypes import PRIMITIVES_NORMAL, PRIMITIVES_REDUCE, PARAMS
 from genotypes import Genotype
 import pdb
+import torch.cuda.nvtx as nvtx
 
 class MixedOp(nn.Module):
 
@@ -121,7 +122,9 @@ class Network(nn.Module):
         weights = self.alphas_reduce
       else:
         weights = self.alphas_normal
+      nvtx.range_push("cell_{}".format(i))
       s0, s1 = s1, cell(s0, s1, weights, updateType)
+      nvtx.range_pop()
     out = self.global_pooling(s1)
     logits = self.classifier(out.view(out.size(0),-1))
     return logits
