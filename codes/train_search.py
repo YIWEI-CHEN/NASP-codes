@@ -1,3 +1,6 @@
+from collections import OrderedDict
+from typing import Iterator, Tuple
+
 import os
 import sys
 import time
@@ -15,7 +18,8 @@ from model_search import Network
 from architect import Architect
 from tensorboard_logger import configure, log_value
 import pdb
-
+from torchgpipe import GPipe
+import update_type
 
 parser = argparse.ArgumentParser("cifar")
 parser.add_argument('--data', type=str, default='../data', help='location of the data corpus')
@@ -68,6 +72,50 @@ CIFAR_CLASSES = 10
 os.environ['CUDA_VISIBLE_DEVICES'] = str(args.gpu)
 
 
+def flatten_sequential(module: nn.Sequential) -> nn.Sequential:
+  """flatten_sequentials a nested sequential module."""
+  d = OrderedDict(_flatten_sequential(module))
+  return nn.Sequential(d)
+
+
+def _flatten_sequential(module: nn.Sequential) -> Iterator[Tuple[str, nn.Module]]:
+  for name, child in module.named_children():
+    # flatten_sequential child sequential layers only.
+    if isinstance(child, nn.Sequential):
+      for sub_name, sub_child in _flatten_sequential(child):
+        yield (f'{name}_{sub_name}', sub_child)
+    else:
+      yield (name, child)
+
+
+class MyGPipe(GPipe):
+  def __init__(self, module, balance,
+               devices = None, chunks = 1, checkpoint = 'except_last', deferred_batch_norm = False):
+    seq_module = flatten_sequential(module)
+    super().__init__(seq_module, balance,
+                     devices=devices, chunks=chunks, checkpoint=checkpoint, deferred_batch_norm=deferred_batch_norm)
+    self._module = module
+    self.devices = module.devices
+
+  def binarization(self):
+    self._module.binarization()
+
+  def restore(self):
+    self._module.restore()
+
+  def genotype(self):
+    return self._module.genotype()
+
+  def clip(self):
+    self._module.clip()
+
+  def is_reduce(self, index):
+    return self._module.is_reduce(index)
+
+  def arch_parameters(self):
+    return self._module.arch_parameters()
+
+
 def main():
   root = logging.getLogger()
 
@@ -83,9 +131,11 @@ def main():
 
   criterion = nn.CrossEntropyLoss()
   criterion = criterion.cuda()
-  model = Network(args.init_channels, CIFAR_CLASSES, args.layers, criterion, args.gpu, args.micro_batch_ratio,
+  balance = [2 + args.layers // 2 * 3, 3 + args.layers // 2 * 3]
+  chunks = 2
+  model = Network(args.init_channels, CIFAR_CLASSES, args.layers, args.gpu, args.micro_batch_ratio,
                   args.greedy, args.l2)
-  # model = model.cuda()
+  model = MyGPipe(model, balance, chunks=chunks)
   root.info("param size = %fMB", utils.count_parameters_in_MB(model))
 
   optimizer = torch.optim.SGD(
@@ -101,7 +151,7 @@ def main():
   scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, float(args.epochs), eta_min=args.learning_rate_min)
 
-  architect = Architect(model, args)
+  architect = Architect(model, criterion, args)
 
   best_acc = 0
   for epoch in range(args.epochs):
@@ -127,7 +177,7 @@ def main():
     root.info("alpha_backward %f", architect.alpha_backward)
     log_value('train_acc', train_acc, epoch)
     root.info('train_acc %f', train_acc)
-    break
+    # break
     # validation
     start_time2 = time.time()
     valid_acc, valid_obj = infer(valid_queue, model, criterion)
@@ -173,10 +223,10 @@ def train(train_queue, valid_queue, model, architect, criterion, optimizer, lr, 
   first_device = model.devices[0]
   last_device = model.devices[-1]
 
-  with torch.autograd.profiler.emit_nvtx():
+  with torch.autograd.profiler.emit_nvtx(enabled=False):
     for step, (input, target) in enumerate(train_queue):
-      if step == 2:
-        break
+      # if step == 2:
+      #   break
       n = input.size(0)
       # input, target for weights
       input = input.cuda(first_device, non_blocking=True)
@@ -189,9 +239,9 @@ def train(train_queue, valid_queue, model, architect, criterion, optimizer, lr, 
 
       # fix weight and update arch
       begin1 = time.time()
-      nvtx.range_push('arch')
+      # nvtx.range_push('arch')
       architect.step(input, target, input_search, target_search, lr, optimizer)
-      nvtx.range_pop()
+      # nvtx.range_pop()
       end1 = time.time()
       alphas_time += end1 - begin1
 
@@ -200,6 +250,7 @@ def train(train_queue, valid_queue, model, architect, criterion, optimizer, lr, 
       model.binarization()
 
       # forward
+      update_type.set_weigths()
       begin.record()
       logits = model(input)
       loss = criterion(logits, target)
@@ -231,7 +282,7 @@ def train(train_queue, valid_queue, model, architect, criterion, optimizer, lr, 
         # root.info('step: {:03d} train_labels[0:5]: {}, valid_labels[0:5]: {}'.format(step, target[0:5], target_search[0:5]))
         _step = epoch * total_batchs + step
         for i, arch in enumerate(model.arch_parameters()):
-          if i in [model._layers // 3, 2 * model._layers // 3]:
+          if model.is_reduce(i):
             cell = 'reduce_{}'.format(i)
           else:
             cell = 'normal_{}'.format(i)

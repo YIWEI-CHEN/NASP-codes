@@ -1,4 +1,4 @@
-from collections import namedtuple
+from collections import namedtuple, OrderedDict
 
 import torch
 import torch.nn as nn
@@ -10,6 +10,9 @@ from genotypes import PRIMITIVES_NORMAL, PRIMITIVES_REDUCE, PARAMS
 from genotypes import Genotype
 import pdb
 import torch.cuda.nvtx as nvtx
+from torchgpipe.skip import Namespace, pop, skippable, stash
+
+import update_type
 
 class MixedOp(nn.Module):
 
@@ -36,10 +39,10 @@ class MixedOp(nn.Module):
 
 class Cell(nn.Module):
 
-  def __init__(self, steps, multiplier, C_prev_prev, C_prev, C, reduction, reduction_prev, device):
+  def __init__(self, steps, multiplier, C_prev_prev, C_prev, C, reduction, reduction_prev, weights):
     super(Cell, self).__init__()
     self.reduction = reduction
-    self.device = device
+    self.weights = weights
 
     if reduction_prev:
       self.preprocess0 = FactorizedReduce(C_prev_prev, C, affine=False)
@@ -56,65 +59,101 @@ class Cell(nn.Module):
         op = MixedOp(C, stride, reduction)
         self._ops.append(op)
 
-  def forward(self, s0, s1, weights, updateType):
-    # weights = weights.to(self.device)
-
+  def forward(self, s0_s1):
+    s0, s1 = s0_s1
     s0 = self.preprocess0(s0)
     s1 = self.preprocess1(s1)
+    self.weights.data = self.weights.to(s0.device, non_blocking=True)
 
     states = [s0, s1]
     offset = 0
     for i in range(self._steps):
-      s = sum(self._ops[offset+j](h, weights[offset+j], updateType) for j, h in enumerate(states))
+      s = sum(self._ops[offset+j](h, self.weights[offset+j], update_type.value) for j, h in enumerate(states))
       offset += len(states)
       states.append(s)
 
     return torch.cat(states[-self._multiplier:], dim=1)
 
 
+@skippable(stash=['s0'])
+class Prev(nn.Module):
+  def forward(self, tensor):
+    yield stash('s0', tensor)
+    return tensor
+
+
+@skippable(pop=['s0'])
+class PrevPrev(nn.Module):
+  def forward(self, s1):
+    s0 = yield pop('s0')
+    return s0, s1
+
+
+class FirstPrevPrev(nn.Module):
+  def forward(self, tensor):
+    return tensor, tensor
+
+
+class LastPrev(nn.Module):
+  def forward(self, tensor):
+    return tensor
+
+
 class Network(nn.Module):
 
-  def __init__(self, C, num_classes, layers, criterion, gpus, micro_batch_ratio, greedy=0, l2=0, steps=4, multiplier=4, stem_multiplier=3):
+  def __init__(self, C, num_classes, layers, gpus, micro_batch_ratio, greedy=0, l2=0, steps=4, multiplier=4, stem_multiplier=3):
     super(Network, self).__init__()
     self._C = C
     self._num_classes = num_classes
     self._layers = layers
-    self._criterion = criterion
+    # self._criterion = criterion
     self._greedy = greedy
     self._l2 = l2
     self._steps = steps
     self._multiplier = multiplier
     self._init_devices(gpus)
     self._micro_batch_ratio = micro_batch_ratio
+    self._initialize_alphas()
 
     C_curr = stem_multiplier*C
     self.stem = nn.Sequential(
       nn.Conv2d(3, C_curr, 3, padding=1, bias=False),
       nn.BatchNorm2d(C_curr)
     )
-    self.stem.to(self.devices[0])
- 
+
     C_prev_prev, C_prev, C_curr = C_curr, C_curr, C
-    self.cells = nn.ModuleList()
+    self.cells = nn.Sequential()
+    all_ns = [Namespace() for _ in range(self._layers)]
     reduction_prev = False
-    self.layers_per_dev = layers // len(self.devices)
     for i in range(layers):
-      device = self.devices[i // self.layers_per_dev]
-      if self._is_reduce(i):
+      weights = self._arch_parameters[i]
+      current_ns = all_ns[i]
+      prev_ns = all_ns[i-1]
+      if self.is_reduce(i):
         C_curr *= 2
         reduction = True
+        name = 'reduce_{}'.format(i)
       else:
         reduction = False
-      cell = Cell(steps, multiplier, C_prev_prev, C_prev, C_curr, reduction, reduction_prev, device)
-      cell.to(device)
+        name = 'normal_{}'.format(i)
+      if i == self._layers - 1:
+        self.cells.add_module('{}_s1'.format(name), LastPrev())
+      else:
+        self.cells.add_module('{}_s1'.format(name), Prev().isolate(current_ns))
+      if i == 0:
+        self.cells.add_module('{}_s0'.format(name), FirstPrevPrev())
+      else:
+        self.cells.add_module('{}_s0'.format(name), PrevPrev().isolate(prev_ns))
+
+      cell = Cell(steps, multiplier, C_prev_prev, C_prev, C_curr, reduction, reduction_prev, weights)
+      self.cells.add_module(name, cell)
       reduction_prev = reduction
-      self.cells += [cell]
       C_prev_prev, C_prev = C_prev, multiplier*C_curr
 
-    self.global_pooling = nn.AdaptiveAvgPool2d(1).to(self.devices[-1])
-    self.classifier = nn.Linear(C_prev, num_classes).to(self.devices[-1])
+    self.global_pooling = nn.AdaptiveAvgPool2d(1)
+    self.flat = nn.Flatten()
+    self.classifier = nn.Linear(C_prev, num_classes)
 
-    self._initialize_alphas()
 
   def new(self):
     model_new = Network(self._C, self._num_classes, self._layers, self._criterion)
@@ -185,11 +224,11 @@ class Network(nn.Module):
     num_ops_reduce = len(PRIMITIVES_REDUCE)
     self._arch_parameters = []
     for i in range(self._layers):
-      device = self.devices[i // self.layers_per_dev]
-      if self._is_reduce(i):
-        alpha = torch.full((k, num_ops_reduce), 0.5, requires_grad=True, device=device)
+      # device = self.devices[i // self.layers_per_dev]
+      if self.is_reduce(i):
+        alpha = torch.full((k, num_ops_reduce), 0.5, requires_grad=True)
       else:
-        alpha = torch.full((k, num_ops_normal), 0.5, requires_grad=True, device=device)
+        alpha = torch.full((k, num_ops_normal), 0.5, requires_grad=True)
       self._arch_parameters.append(alpha)
 
   def save_params(self):
@@ -214,7 +253,8 @@ class Network(nn.Module):
 
   def restore(self):
     for index in range(len(self._arch_parameters)):
-      self._arch_parameters[index].data = self.saved_params[index]
+      device = self._arch_parameters[index].device
+      self._arch_parameters[index].data = self.saved_params[index].to(device, non_blocking=True)
 
   def proximal_step(self, var, max_indexes):
     m, n = var.shape
@@ -264,7 +304,7 @@ class Network(nn.Module):
     GenotypeR = namedtuple('Genotype', 'reduce reduce_concat')
     genotypes = []
     for i, alpha in enumerate(self._arch_parameters):
-      if self._is_reduce(i):
+      if self.is_reduce(i):
         gene = _parse(F.softmax(alpha, dim=-1).data.cpu().numpy(), PRIMITIVES_REDUCE)
         genotype = GenotypeR(reduce=gene, reduce_concat=concat)
       else:
@@ -279,5 +319,5 @@ class Network(nn.Module):
     for i in range(num_gpus):
       self.devices.append(torch.device('cuda:{}'.format(i)))
 
-  def _is_reduce(self, index):
+  def is_reduce(self, index):
     return index in [self._layers // 3, 2 * self._layers // 3]
