@@ -51,6 +51,7 @@ parser.add_argument('--l2', type=float, default=0, help='additional l2 regulariz
 parser.add_argument('--exec_script', type=str, default='scripts/search.sh', help='script to run exp')
 parser.add_argument('-j', '--workers', default=0, type=int, metavar='N',
                     help='number of data loading workers (default: 0)')
+parser.add_argument('--chunks', type=int, default=2, help='chunk size')
 args = parser.parse_args()
 
 args.train_batch_size = args.batch_size
@@ -132,7 +133,7 @@ def main():
   criterion = nn.CrossEntropyLoss()
   criterion = criterion.cuda()
   balance = [2 + args.layers // 2 * 3, 3 + args.layers // 2 * 3]
-  chunks = 2
+  chunks = args.chunks
   model = Network(args.init_channels, CIFAR_CLASSES, args.layers, args.gpu, args.micro_batch_ratio,
                   args.greedy, args.l2)
   model = MyGPipe(model, balance, chunks=chunks)
@@ -286,7 +287,7 @@ def train(train_queue, valid_queue, model, architect, criterion, optimizer, lr, 
             cell = 'reduce_{}'.format(i)
           else:
             cell = 'normal_{}'.format(i)
-          log_arch(cell, arch, _step)
+          # log_arch(cell, arch, _step)
 
   return top1.avg, objs.avg, alphas_time, forward_time, backward_time
 
