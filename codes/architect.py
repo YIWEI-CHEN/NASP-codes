@@ -35,8 +35,8 @@ class Architect(object):
     begin.record()
     # nvtx.range_push('alpha forward')
     logits = self.model(input_valid)
-    # loss = self._criterion(logits, target_valid)
-    nvtx.range_pop()
+    loss = self._criterion(logits, target_valid)
+    # nvtx.range_pop()
     end.record()
     self.alpha_forward += get_elaspe_time(begin, end)
 

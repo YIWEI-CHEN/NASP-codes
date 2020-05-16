@@ -99,6 +99,32 @@ class LastPrev(nn.Module):
     return tensor
 
 
+class Flatten(nn.Module):
+    r"""
+    Flattens a contiguous range of dims into a tensor. For use with :class:`~nn.Sequential`.
+    Args:
+        start_dim: first dim to flatten (default = 1).
+        end_dim: last dim to flatten (default = -1).
+    Shape:
+        - Input: :math:`(N, *dims)`
+        - Output: :math:`(N, \prod *dims)` (for the default case).
+    Examples::
+        >>> m = nn.Sequential(
+        >>>     nn.Conv2d(1, 32, 5, 1, 1),
+        >>>     nn.Flatten()
+        >>> )
+    """
+    __constants__ = ['start_dim', 'end_dim']
+
+    def __init__(self, start_dim=1, end_dim=-1):
+      super(Flatten, self).__init__()
+      self.start_dim = start_dim
+      self.end_dim = end_dim
+
+    def forward(self, input):
+      return input.flatten(self.start_dim, self.end_dim)
+
+
 class Network(nn.Module):
 
   def __init__(self, C, num_classes, layers, gpus, micro_batch_ratio, greedy=0, l2=0, steps=4, multiplier=4, stem_multiplier=3):
@@ -151,7 +177,7 @@ class Network(nn.Module):
       C_prev_prev, C_prev = C_prev, multiplier*C_curr
 
     self.global_pooling = nn.AdaptiveAvgPool2d(1)
-    self.flat = nn.Flatten()
+    self.flat = Flatten()
     self.classifier = nn.Linear(C_prev, num_classes)
 
 
