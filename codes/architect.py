@@ -3,6 +3,8 @@ import numpy as np
 import torch.nn as nn
 from torch.autograd import Variable
 
+from utils import get_elaspe_time
+
 
 def _concat(xs):
   return torch.cat([x.view(-1) for x in xs])
@@ -23,7 +25,22 @@ class Architect(object):
     self.optimizer.step()
 
   def _backward_step(self, input_valid, target_valid, updateType):
+    begin = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
     self.model.binarization()
+
+    begin.record()
     loss = self.model._loss(input_valid, target_valid, updateType)
-    loss.backward()
+    end.record()
+    self.alpha_forward += get_elaspe_time(begin, end)
+
+    begin.record()
+    # loss.backward()
+    grad = torch.autograd.grad(loss, self.model.arch_parameters())
+    for i, arch in enumerate(self.model.arch_parameters()):
+        arch.grad = grad[i]
+
+    end.record()
+    self.alpha_backward += get_elaspe_time(begin, end)
+
     self.model.restore()
