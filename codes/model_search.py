@@ -2,11 +2,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+
 from operations import *
-from torch.autograd import Variable
 from genotypes import PRIMITIVES_NORMAL, PRIMITIVES_REDUCE, PARAMS
 from genotypes import Genotype
-import pdb
 
 class MixedOp(nn.Module):
 
@@ -25,7 +24,7 @@ class MixedOp(nn.Module):
 
   def forward(self, x, weights, updateType):
     if updateType == "weights":
-      result = [w * op(x) if w.data.cpu().numpy() else w for w, op in zip(weights, self._ops)]
+      result = [w * op(x) if w.data else w for w, op in zip(weights, self._ops)]
     else:
       result = [w * op(x) for w, op in zip(weights, self._ops)]
     return sum(result)
@@ -68,7 +67,7 @@ class Cell(nn.Module):
 
 class Network(nn.Module):
 
-  def __init__(self, C, num_classes, layers, criterion, greedy=0, l2=0, steps=4, multiplier=4, stem_multiplier=3):
+  def __init__(self, C, num_classes, layers, criterion, greedy=0, l2=0, steps=4, multiplier=4, stem_multiplier=3, gpu=None):
     super(Network, self).__init__()
     self._C = C
     self._num_classes = num_classes
@@ -78,6 +77,7 @@ class Network(nn.Module):
     self._l2 = l2
     self._steps = steps
     self._multiplier = multiplier
+    self.device = None if gpu is None else torch.device('cuda:{}'.format(gpu))
 
     C_curr = stem_multiplier*C
     self.stem = nn.Sequential(
@@ -89,7 +89,7 @@ class Network(nn.Module):
     self.cells = nn.ModuleList()
     reduction_prev = False
     for i in range(layers):
-      if i in [layers//3, 2*layers//3]:
+      if self.is_reduce(i):
         C_curr *= 2
         reduction = True
       else:
@@ -103,16 +103,6 @@ class Network(nn.Module):
     self.classifier = nn.Linear(C_prev, num_classes)
 
     self._initialize_alphas()
-    self.saved_params = []
-    for w in self._arch_parameters:
-      temp = w.data.clone()
-      self.saved_params.append(temp)
-
-  def new(self):
-    model_new = Network(self._C, self._num_classes, self._layers, self._criterion).cuda()
-    for x, y in zip(model_new.arch_parameters(), self.arch_parameters()):
-        x.data.copy_(y.data)
-    return model_new
 
   def forward(self, input, updateType="weights"):
     s0 = s1 = self.stem(input)
@@ -128,40 +118,28 @@ class Network(nn.Module):
 
   def _loss(self, input, target, updateType):
     logits = self(input, updateType)
-    return self._criterion(logits, target) + self._l2_loss()
-  
-  def _l2_loss(self):
-    normal_burden = []
-    params = 0
-    for key in PRIMITIVES_NORMAL:
-      params += PARAMS[key]
-    for key in PRIMITIVES_NORMAL:
-      normal_burden.append(PARAMS[key]/params)
-    normal_burden = torch.autograd.Variable(torch.Tensor(normal_burden).cuda(), requires_grad=False)
-    return (self.alphas_normal*self.alphas_normal*normal_burden).sum()*self._l2
+    return self._criterion(logits, target)
 
   def _initialize_alphas(self):
     k = sum(1 for i in range(self._steps) for n in range(2+i))
     num_ops_normal = len(PRIMITIVES_NORMAL)
     num_ops_reduce = len(PRIMITIVES_REDUCE)
-    self.alphas_normal = Variable(torch.ones(k, num_ops_normal).cuda()/2, requires_grad=True)
-    self.alphas_reduce = Variable(torch.ones(k, num_ops_reduce).cuda()/2, requires_grad=True)
+    self.alphas_normal = torch.full((k, num_ops_normal), 0.5, requires_grad=True, device=self.device)
+    self.alphas_reduce = torch.full((k, num_ops_reduce), 0.5, requires_grad=True, device=self.device)
     self._arch_parameters = [
       self.alphas_normal,
       self.alphas_reduce,
     ]
 
   def save_params(self):
-    for index,value in enumerate(self._arch_parameters):
-      self.saved_params[index].copy_(value.data)
+    self.saved_params = []
+    for index, arch in enumerate(self._arch_parameters):
+      self.saved_params.append(arch.clone().detach())
 
   def clip(self):
-    clip_scale = []
     m = nn.Hardtanh(0, 1)
     for index in range(len(self._arch_parameters)):
-      clip_scale.append(m(Variable(self._arch_parameters[index].data)))
-    for index in range(len(self._arch_parameters)):
-      self._arch_parameters[index].data = clip_scale[index].data
+      self._arch_parameters[index].data = m(self._arch_parameters[index].data)
 
   def binarization(self, e_greedy=0):
     self.save_params()
@@ -176,10 +154,6 @@ class Network(nn.Module):
   def restore(self):
     for index in range(len(self._arch_parameters)):
       self._arch_parameters[index].data = self.saved_params[index]
-
-  def proximal(self):
-    for index in range(len(self._arch_parameters)):
-      self._arch_parameters[index].data = self.proximal_step(self._arch_parameters[index])
 
   def proximal_step(self, var, max_indexes=None):
     m, n = var.shape
@@ -234,3 +208,5 @@ class Network(nn.Module):
     )
     return genotype
 
+  def is_reduce(self, index):
+    return index in [self._layers // 3, 2 * self._layers // 3]

@@ -2,19 +2,21 @@ import os
 import sys
 import time
 import glob
-import torch
-import utils
 import logging
+import logging.handlers
 import argparse
+
+import torch
 import torch.nn as nn
 import torch.utils
+import torch.distributed as dist
+import torch.multiprocessing as mp
 
-from torch.autograd import Variable
+from tensorboard_logger import configure, log_value
+
+import utils
 from model_search import Network
 from architect import Architect
-from tensorboard_logger import configure, log_value
-import pdb
-
 
 parser = argparse.ArgumentParser("cifar")
 parser.add_argument('--data', type=str, default='../data', help='location of the data corpus')
@@ -24,7 +26,7 @@ parser.add_argument('--learning_rate_min', type=float, default=0.001, help='min 
 parser.add_argument('--momentum', type=float, default=0.9, help='momentum')
 parser.add_argument('--weight_decay', type=float, default=3e-4, help='weight decay')
 parser.add_argument('--report_freq', type=float, default=50, help='report frequency')
-parser.add_argument('--gpu', type=int, default=0, help='gpu device id')
+parser.add_argument('--gpu', type=str, default="0,1", help='gpu device id')
 parser.add_argument('--epochs', type=int, default=50, help='num of training epochs')
 parser.add_argument('--init_channels', type=int, default=16, help='num of init channels')
 parser.add_argument('--layers', type=int, default=8, help='total number of layers')
@@ -42,119 +44,200 @@ parser.add_argument('--name', type=str, default="runs", help='name for log')
 parser.add_argument('--debug', action='store_true', default=False, help='debug or not')
 parser.add_argument('--greedy', type=float, default=0, help='explore and exploitation')
 parser.add_argument('--l2', type=float, default=0, help='additional l2 regularization for alphas')
-parser.add_argument('--exec_script', type=str, default='scripts/search.sh', help='script to run exp')
+parser.add_argument('--exec_script', type=str, default='scripts/dist_search.sh', help='script to run exp')
+parser.add_argument('--dist-url', default='tcp://datalab.cse.tamu.edu:50017', type=str,
+                    help='url used to set up distributed training')
+parser.add_argument('--dist-backend', default='nccl', type=str,
+                    help='distributed backend')
+parser.add_argument('--world-size', default=-1, type=int,
+                    help='number of nodes for distributed training')
+parser.add_argument('--rank', default=-1, type=int,
+                    help='node rank for distributed training')
 parser.add_argument('-j', '--workers', default=0, type=int, metavar='N',
                     help='number of data loading workers (default: 0)')
-args = parser.parse_args()
-
-args.train_batch_size = args.batch_size
-args.valid_batch_size = args.batch_size
-
-args.save = 'search-{}-{}'.format(args.save, time.strftime("%Y%m%d-%H%M%S"))
-if args.debug:
-  args.save += "_debug"
-utils.create_exp_dir(args.save, scripts_to_save=glob.glob('*.py'), exec_script=args.exec_script)
-
-# Logging configuration
-utils.setup_logger(args)
-
-# tensorboard_logger configuration
-configure(args.save + "/%s"%(args.name))
 
 CIFAR_CLASSES = 10
 
-os.environ['CUDA_VISIBLE_DEVICES'] = str(args.gpu)
+
+# class MyDistributedDataParallel(nn.parallel.DistributedDataParallel):
+#   def binarization(self):
+#     self.module.binarization()
+#
+#   def restore(self):
+#     self.module.restore()
+#
+#   def genotype(self):
+#     return self.module.genotype()
+#
+#   def clip(self):
+#     self.module.clip()
+#
+#   def is_reduce(self, index):
+#     return self.module.is_reduce(index)
+#
+#   def arch_parameters(self):
+#     return self.module.arch_parameters()
 
 
 def main():
-  root = logging.getLogger()
+  try:
+    log_queue = None
+    args = parser.parse_args()
+    os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
 
-  if not torch.cuda.is_available():
-    root.info('no gpu device available')
-    sys.exit(1)
+    args.save = 'search-{}-{}'.format(args.save, time.strftime("%Y%m%d-%H%M%S"))
+    utils.create_exp_dir(args.save, scripts_to_save=glob.glob('*.py'), exec_script=args.exec_script)
+
+    # Logging configuration
+    utils.setup_logger(args)
+    root = logging.getLogger()
+
+    if not torch.cuda.is_available():
+      root.info('no gpu device available')
+      sys.exit(1)
+
+    # Log thread to receive log from child processes
+    log_thread, log_queue = utils.run_log_thread()
+
+    root.info('gpu device = {}'.format(args.gpu))
+    root.info("args = %s", args)
+
+    ngpus_per_node = torch.cuda.device_count()
+    # Since we have ngpus_per_node processes per node, the total world_size
+    # needs to be adjusted accordingly
+    args.world_size = ngpus_per_node * args.world_size
+    # Use torch.multiprocessing.spawn to launch distributed processes: the
+    # main_worker process function
+    mp.spawn(main_worker, nprocs=ngpus_per_node, args=(ngpus_per_node, args, log_queue))
+  finally:
+    # close the thread
+    if log_queue is not None:
+      log_queue.put(None)
+      log_thread.join(1.0)
+
+
+def main_worker(gpu, ngpus_per_node, args, log_queue):
+  qh = logging.handlers.QueueHandler(log_queue)
+  root = logging.getLogger()
+  root.setLevel(logging.DEBUG)
+  root.addHandler(qh)
+
+  args.gpu = gpu
 
   # Fix seed
   utils.fix_seed(args.seed)
 
-  root.info('gpu device = %d' % args.gpu)
-  root.info("args = %s", args)
+  try:
+    # For multiprocessing distributed training, rank needs to be the
+    # global rank among all the processes
+    args.rank = args.rank * ngpus_per_node + gpu
+    dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url,
+                            world_size=args.world_size, rank=args.rank)
 
-  criterion = nn.CrossEntropyLoss()
-  criterion = criterion.cuda()
-  model = Network(args.init_channels, CIFAR_CLASSES, args.layers, criterion, args.greedy, args.l2)
-  model = model.cuda()
-  root.info("param size = %fMB", utils.count_parameters_in_MB(model))
+    # tensorboard_logger configuration
+    configure('{}/{}_{}'.format(args.save, args.name, args.rank))
 
-  optimizer = torch.optim.SGD(
+    # define loss function (criterion)
+    criterion = nn.CrossEntropyLoss().cuda(args.gpu)
+
+    # create model
+    model = Network(args.init_channels, CIFAR_CLASSES, args.layers, criterion, args.greedy, args.l2, gpu=args.gpu)
+    root.info("param size = %fMB", utils.count_parameters_in_MB(model))
+
+    # define optimizer
+    optimizer = torch.optim.SGD(
       model.parameters(),
       args.learning_rate,
       momentum=args.momentum,
       weight_decay=args.weight_decay)
 
-  # Data loading code
-  train_queue, train_sampler, valid_queue = utils.get_train_validation_loader(args)
-  test_queue = utils.get_test_loader(args)
+    # For multiprocessing distributed, DistributedDataParallel constructor
+    # should always set the single device scope, otherwise,
+    # DistributedDataParallel will use all available devices.
+    torch.cuda.set_device(args.gpu)
+    model.cuda(args.gpu)
 
-  scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, float(args.epochs), eta_min=args.learning_rate_min)
+    # When using a single GPU per process and per
+    # DistributedDataParallel, we need to divide the batch size
+    # ourselves based on the total number of GPUs we have
+    args.train_batch_size = int(args.batch_size / ngpus_per_node)
+    args.valid_batch_size = int(args.batch_size / ngpus_per_node)
+    args.workers = int((args.workers + ngpus_per_node - 1) / ngpus_per_node)
+    # model = MyDistributedDataParallel(model, device_ids=[args.gpu])
 
-  architect = Architect(model, args)
+    # Meta architecture
+    architect = Architect(model, criterion, args)
 
-  best_acc = 0
-  for epoch in range(args.epochs):
-    lr = scheduler.get_lr()[0]
-    log_value("lr", lr, epoch)
-    root.info('epoch %d lr %e', epoch, lr)
+    # Data loading code
+    train_queue, train_sampler, valid_sampler, valid_queue = utils.get_train_validation_loader(args)
+    test_queue = utils.get_test_loader(args)
 
-    genotype = model.genotype()
-    root.info('genotype = %s', genotype)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+      optimizer, float(args.epochs), eta_min=args.learning_rate_min)
 
-    # training
-    architect.alpha_forward = 0
-    architect.alpha_backward = 0
-    start_time = time.time()
-    train_acc, train_obj, alphas_time, forward_time, backward_time = \
-      train(train_queue, valid_queue, model, architect, criterion, optimizer, lr, epoch)
-    end_time = time.time()
-    root.info("train time %f", end_time - start_time)
-    root.info("alphas_time %f ", alphas_time)
-    root.info("forward_time %f", forward_time)
-    root.info("backward_time %f", backward_time)
-    root.info("alpha_forward %f", architect.alpha_forward)
-    root.info("alpha_backward %f", architect.alpha_backward)
-    log_value('train_acc', train_acc, epoch)
-    root.info('train_acc %f', train_acc)
+    best_acc = 0
+    for epoch in range(args.epochs):
+      train_sampler.set_epoch(epoch)
+      valid_sampler.set_epoch(epoch)
+      lr = scheduler.get_lr()[0]
+      log_value("lr", lr, epoch)
+      root.info('epoch %d lr %e', epoch, lr)
 
-    # validation
-    start_time2 = time.time()
-    valid_acc, valid_obj = infer(valid_queue, model, criterion)
-    end_time2 = time.time()
-    root.info("inference time %f", end_time2 - start_time2)
-    log_value('valid_acc', valid_acc, epoch)
-    root.info('valid_acc %f', valid_acc)
+      genotype = model.genotype()
+      root.info('genotype = %s', genotype)
 
-    # test
-    start = time.time()
-    test_acc, test_obj = infer(test_queue, model, criterion)
-    end = time.time()
-    root.info("inference time %f", end - start)
-    log_value('test_acc', test_acc, epoch)
-    root.info('test_acc %f, test_obj %f', test_acc, test_obj)
+      # training
+      architect.alpha_forward = 0
+      architect.alpha_backward = 0
+      start_time = time.time()
+      train_acc, train_obj, alphas_time, forward_time, backward_time = \
+        train(train_queue, valid_queue, model, architect, criterion, optimizer, lr, args, epoch)
+      end_time = time.time()
+      if args.rank == 0:
+        root.info("train time %f", end_time - start_time)
+        root.info("alphas_time %f ", alphas_time)
+        root.info("alpha_forward %f", architect.alpha_forward)
+        root.info("alpha_backward %f", architect.alpha_backward)
+        root.info("forward_time %f", forward_time)
+        root.info("backward_time %f", backward_time)
+        log_value('train_acc', train_acc, epoch)
+        root.info('train_acc %f', train_acc)
 
-    # update learning rate
-    scheduler.step()
+      # validation
+      start_time2 = time.time()
+      valid_acc, valid_obj = infer(valid_queue, model, criterion, args)
+      end_time2 = time.time()
+      root.info("inference time %f", end_time2 - start_time2)
+      log_value('valid_acc', valid_acc, epoch)
+      root.info('valid_acc %f', valid_acc)
 
-    is_best = valid_acc > best_acc
-    best_acc = max(valid_acc, best_acc)
-    if is_best:
-      root.info('best valid_acc: {} at epoch: {}, test_acc: {}'.format(
-        best_acc, epoch, test_acc
-      ))
-      root.info('Current best genotype = {}'.format(model.genotype()))
-      utils.save(model, os.path.join(args.save, 'best_weights.pt'))
+      # test
+      start = time.time()
+      test_acc, test_obj = infer(test_queue, model, criterion, args)
+      end = time.time()
+      root.info("inference time %f", end - start)
+      log_value('test_acc', test_acc, epoch)
+      root.info('test_acc %f, test_obj %f', test_acc, test_obj)
+
+      # update learning rate
+      scheduler.step()
+
+      if args.rank == 0:
+        is_best = valid_acc > best_acc
+        best_acc = max(valid_acc, best_acc)
+        if is_best:
+          root.info('best valid_acc: {} at epoch: {}, test_acc: {}'.format(
+            best_acc, epoch, test_acc
+          ))
+          root.info('Current best genotype = {}'.format(model.genotype()))
+          utils.save(model, os.path.join(args.save, 'best_weights.pt'))
+
+  except Exception as e:
+    root.error(e)
+    dist.destroy_process_group()
 
 
-def train(train_queue, valid_queue, model, architect, criterion, optimizer, lr, epoch):
+def train(train_queue, valid_queue, model, architect, criterion, optimizer, lr, args, epoch):
   root = logging.getLogger()
 
   objs = utils.AvgrageMeter()
@@ -171,13 +254,13 @@ def train(train_queue, valid_queue, model, architect, criterion, optimizer, lr, 
   for step, (input, target) in enumerate(train_queue):
     n = input.size(0)
     # input, target for weights
-    input = input.cuda(non_blocking=True)
-    target = target.cuda(non_blocking=True)
+    input = input.cuda(args.gpu, non_blocking=True)
+    target = target.cuda(args.gpu, non_blocking=True)
 
     # input, target for arch
     input_search, target_search = next(iter(valid_queue))
-    input_search = input_search.cuda(non_blocking=True)
-    target_search = target_search.cuda(non_blocking=True)
+    input_search = input_search.cuda(args.gpu, non_blocking=True)
+    target_search = target_search.cuda(args.gpu, non_blocking=True)
 
     # fix weight and update arch
     begin1 = time.time()
@@ -193,12 +276,14 @@ def train(train_queue, valid_queue, model, architect, criterion, optimizer, lr, 
     begin.record()
     logits = model(input)
     loss = criterion(logits, target)
+    loss.div_(args.world_size)
     end.record()
     forward_time += utils.get_elaspe_time(begin, end)
 
     # backward
     begin.record()
     loss.backward()
+    reduce_tensorgradients(model.parameters())
     end.record()
     backward_time += utils.get_elaspe_time(begin, end)
 
@@ -212,23 +297,30 @@ def train(train_queue, valid_queue, model, architect, criterion, optimizer, lr, 
 
     # track performance
     prec1, prec5 = utils.accuracy(logits, target, topk=(1, 5))
+    loss = loss.detach()
+    dist.all_reduce(loss)
+    dist.all_reduce(prec1)
+    dist.all_reduce(prec5)
+    prec1.div_(args.world_size)
+    prec5.div_(args.world_size)
+
     objs.update(loss.data.item(), n)
     top1.update(prec1.data.item(), n)
     top5.update(prec5.data.item(), n)
 
-    if step % args.report_freq == 0:
+    if step % args.report_freq == 0 and args.rank == 0:
       root.info('train %03d %e %f %f', step, objs.avg, top1.avg, top5.avg)
       # root.info('step: {:03d} train_labels[0:5]: {}, valid_labels[0:5]: {}'.format(step, target[0:5], target_search[0:5]))
       mapping = {0: 'normal', 1: 'reduce'}
       _step = epoch * total_batchs + step
       for i, arch in enumerate(model.arch_parameters()):
         cell = mapping[i]
-        log_arch(cell, arch, _step)
+        # log_arch(cell, arch, _step)
 
   return top1.avg, objs.avg, alphas_time, forward_time, backward_time
 
 
-def infer(valid_queue, model, criterion):
+def infer(valid_queue, model, criterion, args):
   root = logging.getLogger()
 
   objs = utils.AvgrageMeter()
@@ -236,24 +328,34 @@ def infer(valid_queue, model, criterion):
   top5 = utils.AvgrageMeter()
   model.eval()
   model.binarization()
-  for step, (input, target) in enumerate(valid_queue):
-    input = input.cuda(non_blocking=True)
-    target = target.cuda(non_blocking=True)
 
-    logits = model(input)
-    loss = criterion(logits, target)
+  with torch.no_grad():
+    for step, (input, target) in enumerate(valid_queue):
+      input = input.cuda(non_blocking=True)
+      target = target.cuda(non_blocking=True)
 
-    prec1, prec5 = utils.accuracy(logits, target, topk=(1, 5))
-    n = input.size(0)
-    objs.update(loss.data.item(), n)
-    top1.update(prec1.data.item(), n)
-    top5.update(prec5.data.item(), n)
+      logits = model(input)
+      loss = criterion(logits, target)
+      loss.div_(args.world_size)
+      prec1, prec5 = utils.accuracy(logits, target, topk=(1, 5))
 
-    if step % args.report_freq == 0:
-      root.info('%s %03d %e %f %f', valid_queue.name, step, objs.avg, top1.avg, top5.avg)
-      # root.info('step: {:03d} valid_labels[0:5]: {}'.format(step, target[0:5]))
-  model.restore()
-  return top1.avg, objs.avg
+      loss = loss.detach()
+      dist.all_reduce(loss)
+      dist.all_reduce(prec1)
+      dist.all_reduce(prec5)
+      prec1.div_(args.world_size)
+      prec5.div_(args.world_size)
+
+      n = input.size(0)
+      objs.update(loss.data.item(), n)
+      top1.update(prec1.data.item(), n)
+      top5.update(prec5.data.item(), n)
+
+      if step % args.report_freq == 0 and args.rank == 0:
+        root.info('%s %03d %e %f %f', valid_queue.name, step, objs.avg, top1.avg, top5.avg)
+        # root.info('step: {:03d} valid_labels[0:5]: {}'.format(step, target[0:5]))
+    model.restore()
+    return top1.avg, objs.avg
 
 
 def log_arch(cell, arch, step):
@@ -273,6 +375,13 @@ def log_arch(cell, arch, step):
   log_value('{}_grad_max'.format(cell), arch.grad.max(), step)
   log_value('{}_grad_mean'.format(cell), arch.grad.mean(), step)
   log_value('{}_grad_std'.format(cell), arch.grad.std(), step)
+
+
+def reduce_tensorgradients(tensor_list):
+    """ average gradients """
+    for param in tensor_list:
+      if param.requires_grad and param.grad is not None:
+        dist.all_reduce(param.grad.detach())
 
 
 if __name__ == '__main__':

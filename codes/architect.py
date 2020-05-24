@@ -2,6 +2,7 @@ import torch
 import numpy as np
 import torch.nn as nn
 from torch.autograd import Variable
+import torch.distributed as dist
 
 from utils import get_elaspe_time
 
@@ -12,10 +13,12 @@ def _concat(xs):
 
 class Architect(object):
 
-  def __init__(self, model, args):
+  def __init__(self, model, criterion, args):
     self.network_momentum = args.momentum
     self.network_weight_decay = args.weight_decay
     self.model = model
+    self._criterion = criterion
+    self.world_size = args.world_size
     self.optimizer = torch.optim.Adam(self.model.arch_parameters(),
         lr=args.arch_learning_rate, betas=(0.5, 0.999), weight_decay=args.arch_weight_decay)
 
@@ -30,7 +33,9 @@ class Architect(object):
     self.model.binarization()
 
     begin.record()
-    loss = self.model._loss(input_valid, target_valid, updateType)
+    logits = self.model(input_valid, updateType)
+    loss = self._criterion(logits, target_valid)
+    loss.div_(self.world_size)
     end.record()
     self.alpha_forward += get_elaspe_time(begin, end)
 
@@ -38,6 +43,7 @@ class Architect(object):
     # loss.backward()
     grad = torch.autograd.grad(loss, self.model.arch_parameters())
     for i, arch in enumerate(self.model.arch_parameters()):
+        dist.all_reduce(grad[i].detach())
         arch.grad = grad[i]
 
     end.record()

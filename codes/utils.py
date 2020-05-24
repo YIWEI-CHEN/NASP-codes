@@ -2,9 +2,7 @@ import logging
 import multiprocessing
 import sys
 import threading
-
 import random
-
 import os
 import numpy as np
 import torch
@@ -13,6 +11,8 @@ import torchvision.transforms as transforms
 from torch.autograd import Variable
 from torch.backends import cudnn
 import torchvision.datasets as dset
+from torch.utils import data
+from torch.utils.data.distributed import DistributedSampler
 
 class AvgrageMeter(object):
 
@@ -138,6 +138,7 @@ def fix_seed(seed):
   cudnn.enabled = True
   cudnn.deterministic = True
   torch.cuda.manual_seed(seed)
+  torch.cuda.manual_seed_all(seed)
 
 
 def setup_logger(args):
@@ -155,30 +156,35 @@ def get_train_validation_loader(args):
   train_data = dset.CIFAR10(root=args.data, train=True, download=True, transform=train_transform)
 
   num_train = len(train_data)
-  indices = list(range(num_train))
   split = int(np.floor(args.train_portion * num_train))
+  split_train = data.Subset(train_data,
+                          range(0, split))
+  split_valid = data.Subset(train_data,
+                            range(split, num_train))
 
   # train[0:split] as training data
-  train_sampler = torch.utils.data.sampler.SubsetRandomSampler(indices[:split])
+  train_sampler = DistributedSampler(split_train)
   train_queue = torch.utils.data.DataLoader(
-    train_data, batch_size=args.train_batch_size,
+    split_train, batch_size=args.train_batch_size,
     num_workers=args.workers, pin_memory=True, sampler=train_sampler)
 
   # train[split:] as validation data
-  valid_sampler = torch.utils.data.sampler.SubsetRandomSampler(indices[split:])
+  valid_sampler = DistributedSampler(split_valid)
   valid_queue = torch.utils.data.DataLoader(
     train_data, batch_size=args.valid_batch_size,
     num_workers=args.workers, pin_memory=True, sampler=valid_sampler)
   valid_queue.name = 'valid'
 
-  return train_queue, train_sampler, valid_queue
+  return train_queue, train_sampler, valid_sampler, valid_queue
 
 
 def get_test_loader(args):
   _, test_transform = _data_transforms_cifar10(args)
   test_data = dset.CIFAR10(root=args.data, train=False, download=True, transform=test_transform)
+  test_sampler = DistributedSampler(test_data)
   test_queue = torch.utils.data.DataLoader(
-    test_data, batch_size=args.valid_batch_size, shuffle=False, pin_memory=True, num_workers=args.workers)
+    test_data, batch_size=args.valid_batch_size,
+    num_workers=args.workers, pin_memory=True, sampler=test_sampler)
   test_queue.name = 'test'
   return test_queue
 
