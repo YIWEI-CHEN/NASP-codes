@@ -48,7 +48,7 @@ parser.add_argument('--name', type=str, default="runs", help='name for log')
 parser.add_argument('--debug', action='store_true', default=False, help='debug or not')
 parser.add_argument('--greedy', type=float, default=0, help='explore and exploitation')
 parser.add_argument('--l2', type=float, default=0, help='additional l2 regularization for alphas')
-parser.add_argument('--exec_script', type=str, default='scripts/search.sh', help='script to run exp')
+parser.add_argument('--exec_script', type=str, default='scripts/pipeline_search.sh', help='script to run exp')
 parser.add_argument('-j', '--workers', default=0, type=int, metavar='N',
                     help='number of data loading workers (default: 0)')
 parser.add_argument('--chunks', type=int, default=2, help='chunk size')
@@ -149,8 +149,28 @@ def main():
   train_queue, train_sampler, valid_queue = utils.get_train_validation_loader(args)
   test_queue = utils.get_test_loader(args)
 
-  scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, float(args.epochs), eta_min=args.learning_rate_min)
+  # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+  #       optimizer, float(args.epochs), eta_min=args.learning_rate_min)
+  lr_multiplier = max(1.0, args.train_batch_size / 68)
+  warmup = 4.0
+  decay = 0.25
+
+  def gradual_warmup_linear_scaling(step: int) -> float:
+    epoch = step / float(args.epochs)
+
+    # Gradual warmup
+    warmup_ratio = min(warmup, epoch) / warmup
+    multiplier = warmup_ratio * (lr_multiplier - 1.0) + 1.0
+
+    if step < 17:
+      return 1.0 * multiplier
+    elif step < 33:
+      return decay * multiplier
+    elif step < 44:
+      return decay ** 2 * multiplier
+    return decay ** 3 * multiplier
+
+  scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=gradual_warmup_linear_scaling)
 
   architect = Architect(model, criterion, args)
 
@@ -206,7 +226,8 @@ def main():
       ))
       root.info('Current best genotype = {}'.format('\n'.join(str(g) for g in model.genotype())))
       utils.save(model, os.path.join(args.save, 'best_weights.pt'))
-
+    if epoch in [17, 33, 44]:
+      utils.save(model, os.path.join(args.save, 'best_weights{}.pt'.format(epoch)))
 
 def train(train_queue, valid_queue, model, architect, criterion, optimizer, lr, epoch):
   root = logging.getLogger()
