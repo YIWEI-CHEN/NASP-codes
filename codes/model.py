@@ -154,7 +154,10 @@ class NetworkCIFAR(nn.Module):
         reduction = True
       else:
         reduction = False
-      cell = Cell(genotype, C_prev_prev, C_prev, C_curr, reduction, reduction_prev)
+      if isinstance(genotype, list):
+        cell = Cell(genotype[i], C_prev_prev, C_prev, C_curr, reduction, reduction_prev)
+      else:
+        cell = Cell(genotype, C_prev_prev, C_prev, C_curr, reduction, reduction_prev)
       reduction_prev = reduction
       self.cells += [cell]
       C_prev_prev, C_prev = C_prev, cell.multiplier*C_curr

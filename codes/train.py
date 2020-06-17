@@ -96,7 +96,6 @@ def main():
 
   best_acc = 0
   for epoch in range(args.epochs):
-    scheduler.step()
     lr = scheduler.get_lr()[0]
     log_value("lr", lr, epoch)
     root.info('epoch %d lr %e', epoch, lr)
@@ -117,6 +116,8 @@ def main():
     root.info('test_acc %f, test_obj %f', test_acc, test_obj)
     log_value('test_acc', test_acc, epoch)
 
+    # update learning rate
+    scheduler.step()
     utils.save(model, os.path.join(args.save, 'weights.pt'))
 
     is_best = valid_acc > best_acc
@@ -167,21 +168,22 @@ def infer(valid_queue, model, criterion):
   top5 = utils.AvgrageMeter()
   model.eval()
 
-  for step, (input, target) in enumerate(valid_queue):
-    input = input.cuda(non_blocking=True)
-    target = target.cuda(non_blocking=True)
+  with torch.no_grad():
+    for step, (input, target) in enumerate(valid_queue):
+      input = input.cuda(non_blocking=True)
+      target = target.cuda(non_blocking=True)
 
-    logits, _ = model(input)
-    loss = criterion(logits, target)
+      logits, _ = model(input)
+      loss = criterion(logits, target)
 
-    prec1, prec5 = utils.accuracy(logits, target, topk=(1, 5))
-    n = input.size(0)
-    objs.update(loss.item(), n)
-    top1.update(prec1.item(), n)
-    top5.update(prec5.item(), n)
+      prec1, prec5 = utils.accuracy(logits, target, topk=(1, 5))
+      n = input.size(0)
+      objs.update(loss.item(), n)
+      top1.update(prec1.item(), n)
+      top5.update(prec5.item(), n)
 
-    if step % args.report_freq == 0:
-      root.info('%s %03d %e %f %f', valid_queue.name, step, objs.avg, top1.avg, top5.avg)
+      if step % args.report_freq == 0:
+        root.info('%s %03d %e %f %f', valid_queue.name, step, objs.avg, top1.avg, top5.avg)
 
   return top1.avg, objs.avg
 
@@ -220,5 +222,9 @@ def get_test_loader(args):
 
 
 if __name__ == '__main__':
-  main() 
+  root = logging.getLogger()
+  begin = time.time()
+  main()
+  end = time.time()
+  root.info('total train time: {} s'.format(end - begin))
 

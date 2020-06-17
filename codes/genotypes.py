@@ -80,3 +80,54 @@ AmoebaNet = Genotype(
 
 NASP = Genotype(normal=[('conv_3x1_1x3', 0), ('conv 3x3', 1), ('dil_conv_3x3', 2), ('conv 3x3', 1), ('dil_conv_3x3', 2), ('conv 3x3', 0), ('skip_connect', 0), ('dil_conv_3x3', 3)], normal_concat=range(2, 6), reduce=[('max_pool_3x3', 0), ('max_pool_3x3', 1), ('skip_connect', 2), ('max_pool_5x5', 1), ('skip_connect', 2), ('skip_connect', 3), ('skip_connect', 0), ('skip_connect', 1)], reduce_concat=range(2, 6))
 SINGLE_NASP = Genotype(normal=[('conv_3x1_1x3', 0), ('conv 1x1', 1), ('conv 3x3', 1), ('conv 1x1', 0), ('dil_conv_3x3', 0), ('dil_conv_3x3', 3), ('conv_3x1_1x3', 1), ('sep_7x7', 3)], normal_concat=range(2, 6), reduce=[('max_pool_3x3', 1), ('max_pool_5x5', 0), ('skip_connect', 2), ('skip_connect', 0), ('skip_connect', 2), ('skip_connect', 3), ('skip_connect', 4), ('skip_connect', 2)], reduce_concat=range(2, 6))
+
+GenotypeN = namedtuple('GenotypeN', 'normal normal_concat')
+GenotypeR = namedtuple('GenotypeR', 'reduce reduce_concat')
+
+L20_NASP = [
+    GenotypeN(normal=[('conv_3x1_1x3', 1), ('skip_connect', 0), ('dil_conv_3x3', 0), ('conv 1x1', 1), ('conv 1x1', 1), ('skip_connect', 3), ('skip_connect', 2), ('conv 3x3', 0)], normal_concat=range(2, 6)),
+    GenotypeN(normal=[('skip_connect', 1), ('sep_7x7', 0), ('dil_conv_3x3', 1), ('sep_5x5', 0), ('skip_connect', 3), ('skip_connect', 2), ('sep_3x3', 1), ('skip_connect', 3)], normal_concat=range(2, 6)),
+    GenotypeN(normal=[('skip_connect', 0), ('skip_connect', 1), ('skip_connect', 0), ('skip_connect', 1), ('skip_connect', 3), ('conv 3x3', 1), ('conv_3x1_1x3', 0), ('skip_connect', 4)], normal_concat=range(2, 6)),
+    GenotypeN(normal=[('conv 3x3', 1), ('sep_7x7', 0), ('skip_connect', 1), ('sep_7x7', 2), ('conv 3x3', 3), ('skip_connect', 0), ('skip_connect', 2), ('conv 1x1', 0)], normal_concat=range(2, 6)),
+    GenotypeN(normal=[('conv_3x1_1x3', 0), ('conv 3x3', 1), ('skip_connect', 2), ('sep_7x7', 0), ('conv 3x3', 0), ('conv 1x1', 2), ('dil_conv_3x3', 1), ('sep_7x7', 0)], normal_concat=range(2, 6)),
+    GenotypeN(normal=[('skip_connect', 0), ('sep_3x3', 1), ('dil_conv_3x3', 1), ('conv_3x1_1x3', 0), ('conv_3x1_1x3', 0), ('skip_connect', 2), ('skip_connect', 4), ('skip_connect', 3)], normal_concat=range(2, 6)),
+    GenotypeR(reduce=[('max_pool_5x5', 0), ('max_pool_3x3', 1), ('skip_connect', 2), ('max_pool_5x5', 1), ('skip_connect', 2), ('skip_connect', 3), ('skip_connect', 4), ('skip_connect', 2)], reduce_concat=range(2, 6)),
+    GenotypeN(normal=[('conv 3x3', 1), ('sep_3x3', 0), ('conv_3x1_1x3', 1), ('sep_7x7', 2), ('skip_connect', 2), ('dil_conv_3x3', 0), ('conv 1x1', 1), ('skip_connect', 2)], normal_concat=range(2, 6)),
+    GenotypeN(normal=[('conv 3x3', 0), ('sep_3x3', 1), ('skip_connect', 2), ('dil_conv_3x3', 1), ('sep_3x3', 0), ('skip_connect', 1), ('sep_7x7', 0), ('sep_7x7', 1)], normal_concat=range(2, 6)),
+    GenotypeN(normal=[('conv 1x1', 1), ('sep_7x7', 0), ('conv 3x3', 1), ('skip_connect', 2), ('skip_connect', 0), ('conv_3x1_1x3', 1), ('skip_connect', 0), ('skip_connect', 4)], normal_concat=range(2, 6)),
+    GenotypeN(normal=[('conv 3x3', 0), ('skip_connect', 1), ('conv 3x3', 0), ('dil_conv_3x3', 1), ('skip_connect', 2), ('dil_conv_3x3', 1), ('conv 3x3', 0), ('skip_connect', 3)], normal_concat=range(2, 6)),
+    GenotypeN(normal=[('sep_7x7', 0), ('conv 3x3', 1), ('sep_3x3', 0), ('skip_connect', 2), ('conv 1x1', 0), ('skip_connect', 3), ('conv 3x3', 0), ('sep_7x7', 1)], normal_concat=range(2, 6)),
+    GenotypeN(normal=[('conv 1x1', 0), ('conv 1x1', 1), ('sep_5x5', 1), ('sep_5x5', 2), ('skip_connect', 2), ('skip_connect', 3), ('skip_connect', 4), ('skip_connect', 3)], normal_concat=range(2, 6)),
+    GenotypeR(reduce=[('skip_connect', 0), ('skip_connect', 1), ('skip_connect', 2), ('max_pool_7x7', 0), ('skip_connect', 2), ('skip_connect', 3), ('skip_connect', 4), ('skip_connect', 2)], reduce_concat=range(2, 6)),
+    GenotypeN(normal=[('sep_5x5', 1), ('dil_conv_3x3', 0), ('conv 3x3', 1), ('skip_connect', 2), ('conv 1x1', 0), ('skip_connect', 3), ('skip_connect', 3), ('skip_connect', 4)], normal_concat=range(2, 6)),
+    GenotypeN(normal=[('dil_conv_3x3', 1), ('conv 3x3', 0), ('skip_connect', 2), ('skip_connect', 1), ('conv 3x3', 0), ('skip_connect', 2), ('conv 3x3', 0), ('skip_connect', 4)], normal_concat=range(2, 6)),
+    GenotypeN(normal=[('skip_connect', 0), ('sep_5x5', 1), ('skip_connect', 0), ('skip_connect', 2), ('sep_7x7', 1), ('sep_7x7', 0), ('skip_connect', 2), ('skip_connect', 0)], normal_concat=range(2, 6)),
+    GenotypeN(normal=[('conv 3x3', 0), ('skip_connect', 1), ('skip_connect', 0), ('conv 3x3', 2), ('skip_connect', 3), ('skip_connect', 1), ('skip_connect', 0), ('skip_connect', 2)], normal_concat=range(2, 6)),
+    GenotypeN(normal=[('conv 1x1', 0), ('skip_connect', 1), ('conv 1x1', 1), ('skip_connect', 2), ('skip_connect', 2), ('conv 3x3', 1), ('skip_connect', 3), ('skip_connect', 2)], normal_concat=range(2, 6)),
+    GenotypeN(normal=[('skip_connect', 1), ('sep_5x5', 0), ('dil_conv_3x3', 1), ('conv 3x3', 0), ('skip_connect', 1), ('sep_7x7', 0), ('sep_5x5', 1), ('conv_3x1_1x3', 2)], normal_concat=range(2, 6)),
+ ]
+
+SINGLE_NASP_0503 = Genotype(normal=[('conv_3x1_1x3', 1), ('conv_3x1_1x3', 0), ('sep_5x5', 2), ('skip_connect', 0), ('sep_5x5', 1), ('conv 1x1', 0), ('sep_5x5', 2), ('conv 1x1', 3)], normal_concat=range(2, 6), reduce=[('max_pool_3x3', 1), ('max_pool_3x3', 0), ('skip_connect', 2), ('max_pool_3x3', 1), ('skip_connect', 2), ('skip_connect', 3), ('skip_connect', 2), ('skip_connect', 3)], reduce_concat=range(2, 6))
+
+L8_2_L20_0601 = [
+    GenotypeN(normal=[('sep_3x3', 0), ('dil_conv_3x3', 1), ('sep_3x3', 2), ('sep_5x5', 0), ('dil_conv_3x3', 0), ('conv 1x1', 2), ('conv 3x3', 0), ('sep_5x5', 1)], normal_concat=range(2, 6)),
+    GenotypeN(normal=[('sep_3x3', 0), ('dil_conv_3x3', 1), ('sep_3x3', 2), ('sep_5x5', 0), ('dil_conv_3x3', 0), ('conv 1x1', 2), ('conv 3x3', 0), ('sep_5x5', 1)], normal_concat=range(2, 6)),
+    GenotypeN(normal=[('sep_3x3', 0), ('dil_conv_3x3', 1), ('sep_3x3', 2), ('sep_5x5', 0), ('dil_conv_3x3', 0), ('conv 1x1', 2), ('conv 3x3', 0), ('sep_5x5', 1)], normal_concat=range(2, 6)),
+    GenotypeN(normal=[('dil_conv_3x3', 0), ('sep_7x7', 1), ('sep_3x3', 1), ('conv 3x3', 2), ('conv_3x1_1x3', 2), ('sep_3x3', 3), ('conv 1x1', 0), ('skip_connect', 4)], normal_concat=range(2, 6)),
+    GenotypeN(normal=[('dil_conv_3x3', 0), ('sep_7x7', 1), ('sep_3x3', 1), ('conv 3x3', 2), ('conv_3x1_1x3', 2), ('sep_3x3', 3), ('conv 1x1', 0), ('skip_connect', 4)], normal_concat=range(2, 6)),
+    GenotypeN(normal=[('dil_conv_3x3', 0), ('sep_7x7', 1), ('sep_3x3', 1), ('conv 3x3', 2), ('conv_3x1_1x3', 2), ('sep_3x3', 3), ('conv 1x1', 0), ('skip_connect', 4)], normal_concat=range(2, 6)),
+    GenotypeR(reduce=[('max_pool_3x3', 0), ('max_pool_3x3', 1), ('max_pool_3x3', 0), ('skip_connect', 2), ('max_pool_3x3', 0), ('skip_connect', 3), ('avg_pool_3x3', 0), ('skip_connect', 4)], reduce_concat=range(2, 6)),
+    GenotypeN(normal=[('conv 3x3', 1), ('conv 3x3', 0), ('sep_7x7', 1), ('sep_7x7', 0), ('sep_7x7', 1), ('skip_connect', 3), ('conv 3x3', 2), ('sep_3x3', 0)], normal_concat=range(2, 6)),
+    GenotypeN(normal=[('conv 3x3', 1), ('conv 3x3', 0), ('sep_7x7', 1), ('sep_7x7', 0), ('sep_7x7', 1), ('skip_connect', 3), ('conv 3x3', 2), ('sep_3x3', 0)], normal_concat=range(2, 6)),
+    GenotypeN(normal=[('conv 3x3', 1), ('conv 3x3', 0), ('sep_7x7', 1), ('sep_7x7', 0), ('sep_7x7', 1), ('skip_connect', 3), ('conv 3x3', 2), ('sep_3x3', 0)], normal_concat=range(2, 6)),
+    GenotypeN(normal=[('sep_3x3', 1), ('dil_conv_3x3', 0), ('dil_conv_3x3', 2), ('conv 1x1', 0), ('skip_connect', 2), ('skip_connect', 3), ('skip_connect', 2), ('skip_connect', 4)], normal_concat=range(2, 6)),
+    GenotypeN(normal=[('sep_3x3', 1), ('dil_conv_3x3', 0), ('dil_conv_3x3', 2), ('conv 1x1', 0), ('skip_connect', 2), ('skip_connect', 3), ('skip_connect', 2), ('skip_connect', 4)], normal_concat=range(2, 6)),
+    GenotypeN(normal=[('sep_3x3', 1), ('dil_conv_3x3', 0), ('dil_conv_3x3', 2), ('conv 1x1', 0), ('skip_connect', 2), ('skip_connect', 3), ('skip_connect', 2), ('skip_connect', 4)], normal_concat=range(2, 6)),
+    GenotypeR(reduce=[('skip_connect', 1), ('max_pool_3x3', 0), ('skip_connect', 2), ('max_pool_5x5', 0), ('skip_connect', 2), ('skip_connect', 3), ('skip_connect', 4), ('skip_connect', 3)], reduce_concat=range(2, 6)),
+    GenotypeN(normal=[('sep_5x5', 0), ('sep_7x7', 1), ('conv_3x1_1x3', 0), ('skip_connect', 2), ('skip_connect', 2), ('conv_3x1_1x3', 1), ('skip_connect', 2), ('skip_connect', 4)], normal_concat=range(2, 6)),
+    GenotypeN(normal=[('sep_5x5', 0), ('sep_7x7', 1), ('conv_3x1_1x3', 0), ('skip_connect', 2), ('skip_connect', 2), ('conv_3x1_1x3', 1), ('skip_connect', 2), ('skip_connect', 4)], normal_concat=range(2, 6)),
+    GenotypeN(normal=[('sep_5x5', 0), ('sep_7x7', 1), ('conv_3x1_1x3', 0), ('skip_connect', 2), ('skip_connect', 2), ('conv_3x1_1x3', 1), ('skip_connect', 2), ('skip_connect', 4)], normal_concat=range(2, 6)),
+    GenotypeN(normal=[('sep_5x5', 0), ('conv 1x1', 1), ('sep_7x7', 2), ('dil_conv_3x3', 0), ('conv 3x3', 1), ('sep_5x5', 0), ('skip_connect', 3), ('skip_connect', 1)], normal_concat=range(2, 6)),
+    GenotypeN(normal=[('sep_5x5', 0), ('conv 1x1', 1), ('sep_7x7', 2), ('dil_conv_3x3', 0), ('conv 3x3', 1), ('sep_5x5', 0), ('skip_connect', 3), ('skip_connect', 1)], normal_concat=range(2, 6)),
+    GenotypeN(normal=[('sep_5x5', 0), ('conv 1x1', 1), ('sep_7x7', 2), ('dil_conv_3x3', 0), ('conv 3x3', 1), ('sep_5x5', 0), ('skip_connect', 3), ('skip_connect', 1)], normal_concat=range(2, 6)),
+]
