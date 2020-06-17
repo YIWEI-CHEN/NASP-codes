@@ -132,7 +132,14 @@ def main():
 
   criterion = nn.CrossEntropyLoss()
   criterion = criterion.cuda()
-  balance = [2 + args.layers // 2 * 3, 3 + args.layers // 2 * 3]
+  num_gpus = len(args.gpu.split(','))
+  if num_gpus > 1:
+    balance = [args.layers // num_gpus * 3 for _ in range(num_gpus)]
+    balance[0] += 2
+    balance[-1] += 3
+  else:
+    balance = [2 + args.layers * 3 + 3]
+  root.info("balanace {}".format(balance))
   chunks = args.chunks
   model = Network(args.init_channels, CIFAR_CLASSES, args.layers, args.gpu, args.micro_batch_ratio,
                   args.greedy, args.l2)
@@ -153,7 +160,7 @@ def main():
   #       optimizer, float(args.epochs), eta_min=args.learning_rate_min)
   lr_multiplier = max(1.0, args.train_batch_size / 68)
   warmup = 4.0
-  decay = 0.25
+  decay = 0.5
 
   def gradual_warmup_linear_scaling(step: int) -> float:
     epoch = step / float(args.epochs)
@@ -162,6 +169,15 @@ def main():
     warmup_ratio = min(warmup, epoch) / warmup
     multiplier = warmup_ratio * (lr_multiplier - 1.0) + 1.0
 
+    # if step < 15:
+    #   return 1.0 * multiplier
+    # elif step < 30:
+    #   return decay * multiplier
+    # elif step < 40:
+    #   return decay ** 2 * multiplier
+    # elif step < 45:
+    #   return decay ** 3 * multiplier
+    # return decay ** 4 * multiplier
     if step < 17:
       return 1.0 * multiplier
     elif step < 33:
@@ -226,8 +242,8 @@ def main():
       ))
       root.info('Current best genotype = {}'.format('\n'.join(str(g) for g in model.genotype())))
       utils.save(model, os.path.join(args.save, 'best_weights.pt'))
-    if epoch in [17, 33, 44]:
-      utils.save(model, os.path.join(args.save, 'best_weights{}.pt'.format(epoch)))
+    # if epoch in [16, 32, 43]:
+    #   utils.save(model, os.path.join(args.save, 'best_weights{}.pt'.format(epoch)))
 
 def train(train_queue, valid_queue, model, architect, criterion, optimizer, lr, epoch):
   root = logging.getLogger()
