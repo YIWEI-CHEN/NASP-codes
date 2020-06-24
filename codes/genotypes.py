@@ -131,3 +131,5 @@ L8_2_L20_0601 = [
     GenotypeN(normal=[('sep_5x5', 0), ('conv 1x1', 1), ('sep_7x7', 2), ('dil_conv_3x3', 0), ('conv 3x3', 1), ('sep_5x5', 0), ('skip_connect', 3), ('skip_connect', 1)], normal_concat=range(2, 6)),
     GenotypeN(normal=[('sep_5x5', 0), ('conv 1x1', 1), ('sep_7x7', 2), ('dil_conv_3x3', 0), ('conv 3x3', 1), ('sep_5x5', 0), ('skip_connect', 3), ('skip_connect', 1)], normal_concat=range(2, 6)),
 ]
+
+SINGLE_NASP_0616 = Genotype(normal=[('dil_conv_3x3', 0), ('conv 3x3', 1), ('sep_3x3', 0), ('dil_conv_3x3', 1), ('sep_3x3', 0), ('sep_7x7', 2), ('sep_7x7', 0), ('sep_7x7', 3)], normal_concat=range(2, 6), reduce=[('avg_pool_3x3', 1), ('skip_connect', 0), ('avg_pool_3x3', 1), ('skip_connect', 2), ('skip_connect', 1), ('avg_pool_3x3', 0), ('max_pool_3x3', 0), ('max_pool_5x5', 1)], reduce_concat=range(2, 6))
