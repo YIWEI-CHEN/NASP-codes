@@ -36,7 +36,7 @@ class Architect(object):
 
     begin.record()
     # loss.backward()
-    grad = torch.autograd.grad(loss, self.model.arch_parameters())
+    grad = torch.autograd.grad(loss, self.model.arch_parameters_binary())
     for i, arch in enumerate(self.model.arch_parameters()):
         arch.grad = grad[i]
 

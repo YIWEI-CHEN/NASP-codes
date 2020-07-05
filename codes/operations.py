@@ -91,8 +91,10 @@ class Identity(nn.Module):
 
   def __init__(self):
     super(Identity, self).__init__()
+    self.relu = nn.ReLU(inplace=False)
 
   def forward(self, x):
+    x = self.relu(x)
     return x
 
 
