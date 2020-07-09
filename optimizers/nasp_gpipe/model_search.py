@@ -10,9 +10,10 @@ from optimizers.darts.genotypes import PRIMITIVES
 
 class NASPNetwork(Network):
 
-    def __init__(self, C, num_classes, layers, criterion, output_weights, search_space, steps=4):
+    def __init__(self, C, num_classes, layers, criterion, output_weights, search_space, steps=4, gpus='0'):
         super(NASPNetwork, self).__init__(C, num_classes, layers, criterion, output_weights,
                                           search_space, steps=steps)
+        self._init_devices(gpus)
         self.saved_params = []
         for w in self._arch_parameters:
             temp = w.data.clone()
@@ -89,3 +90,7 @@ class NASPNetwork(Network):
                     values[i][j] = 0
         return values
 
+    def _init_devices(self, gpus):
+        self.devices = []
+        for i in gpus.split(','):
+            self.devices.append(torch.device('cuda:{}'.format(i)))

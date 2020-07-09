@@ -121,9 +121,10 @@ class MyGPipe(GPipe):
                devices = None, chunks = 1, checkpoint = 'except_last', deferred_batch_norm = False):
     seq_module = flatten_sequential(module)
     super().__init__(seq_module, balance,
-                     devices=devices, chunks=chunks, checkpoint=checkpoint, deferred_batch_norm=deferred_batch_norm)
+                     devices=module.devices, chunks=chunks, checkpoint=checkpoint, deferred_batch_norm=deferred_batch_norm)
     self._module = module
     self.len_arch_param = module.len_arch_param
+    self.devices = module.devices
 
   def binarization(self):
     self._module.binarization()
@@ -162,7 +163,6 @@ def main():
     np.random.seed(args.seed)
     # torch.cuda.set_device(args.gpu)
     # os.environ['CUDA_VISIBLE_DEVICES'] = str(args.gpu)
-    print(os.environ['CUDA_VISIBLE_DEVICES'])
     cudnn.benchmark = True
     torch.manual_seed(args.seed)
     cudnn.enabled = True
@@ -184,7 +184,7 @@ def main():
     criterion = criterion.cuda()
     model = Network(args.init_channels, CIFAR_CLASSES, args.layers, criterion, 
                     output_weights=args.output_weights, steps=search_space.num_intermediate_nodes, 
-                    search_space=search_space)
+                    search_space=search_space, gpus=args.gpu)
     # model.to(torch.device('cuda:0}'))
     model = MyGPipe(model, balance, chunks=chunks)
     logging.info("param size = %fMB", utils.count_parameters_in_MB(model))
@@ -216,14 +216,33 @@ def main():
         sampler=torch.utils.data.sampler.SubsetRandomSampler(indices[split:num_train]),
         pin_memory=True)
 
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, float(args.epochs), eta_min=args.learning_rate_min)
+    # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+    #     optimizer, float(args.epochs), eta_min=args.learning_rate_min)
+    lr_multiplier = max(1.0, args.batch_size / 96)
+    warmup = 4.0
+    decay = 0.5
+
+    def gradual_warmup_linear_scaling(step: int) -> float:
+        epoch = step / float(args.epochs)
+
+        # Gradual warmup
+        warmup_ratio = min(warmup, epoch) / warmup
+        multiplier = warmup_ratio * (lr_multiplier - 1.0) + 1.0
+
+        if step < 17:
+            return 1.0 * multiplier
+        elif step < 33:
+            return decay * multiplier
+        elif step < 44:
+            return decay ** 2 * multiplier
+        return decay ** 3 * multiplier
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=gradual_warmup_linear_scaling)
 
     analyzer = Analyzer(model, args)
     architect = Architect(model, criterion, args)
 
     for epoch in range(args.epochs):
-        scheduler.step()
         lr = scheduler.get_lr()[0]
         # increase the cutout probability linearly throughout search
         train_transform.transforms[-1].cutout_prob = args.cutout_prob * epoch / (args.epochs - 1)
@@ -282,6 +301,7 @@ def main():
             writer.add_scalar('Analysis/valid', valid, epoch)
             writer.add_scalar('Analysis/runtime', runtime, epoch)
             writer.add_scalar('Analysis/params', params, epoch)
+        scheduler.step()
     writer.close()
 
 
@@ -290,8 +310,8 @@ def train(train_queue, valid_queue, model, architect, criterion, optimizer, lr, 
     top1 = utils.AvgrageMeter()
     top5 = utils.AvgrageMeter()
 
-    first_device = torch.device('cuda:{}'.format(0))
-    last_device = torch.device('cuda:{}'.format(num_gpus - 1))
+    first_device = model.devices[0]
+    last_device = model.devices[-1]
 
     for step, (input, target) in enumerate(train_queue):
         model.train()
@@ -367,8 +387,8 @@ def infer(valid_queue, model, criterion):
     model.eval()
     model.binarization()
 
-    first_device = torch.device('cuda:{}'.format(0))
-    last_device = torch.device('cuda:{}'.format(num_gpus - 1))
+    first_device = model.devices[0]
+    last_device = model.devices[-1]
 
     with torch.no_grad():
         for step, (input, target) in enumerate(valid_queue):
